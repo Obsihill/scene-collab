@@ -133,6 +133,50 @@ namespace SceneCollab.Editor.SceneSync
             return true;
         }
 
+        /// <summary>
+        /// Binds an object to an id chosen elsewhere (a created object whose id was minted by the
+        /// creator). The global id is attached on the next save, when Unity can produce one.
+        /// </summary>
+        public void Adopt(GameObject gameObject, string nodeId)
+        {
+            if (gameObject == null || !StableNodeId.IsValid(nodeId))
+            {
+                return;
+            }
+
+            _idByObject[gameObject] = nodeId;
+            _objectByNode[nodeId] = gameObject;
+        }
+
+        public bool HasNodeId(GameObject gameObject)
+        {
+            string nodeId;
+            return TryGetNodeId(gameObject, out nodeId);
+        }
+
+        /// <summary>Existing id for an object, never assigning one.</summary>
+        public bool TryGetNodeId(GameObject gameObject, out string nodeId)
+        {
+            nodeId = null;
+            if (gameObject == null)
+            {
+                return false;
+            }
+
+            if (_idByObject.TryGetValue(gameObject, out nodeId))
+            {
+                return !string.IsNullOrEmpty(nodeId);
+            }
+
+            return EnsureNodeId(gameObject) != null && _idByObject.TryGetValue(gameObject, out nodeId);
+        }
+
+        /// <summary>Copy of the node → object map, for sweeps that must tolerate destroyed objects.</summary>
+        public List<KeyValuePair<string, GameObject>> Entries()
+        {
+            return new List<KeyValuePair<string, GameObject>>(_objectByNode);
+        }
+
         public string GetGlobalId(string nodeId)
         {
             string globalId;
@@ -243,10 +287,21 @@ namespace SceneCollab.Editor.SceneSync
                     continue;
                 }
 
+                // An object created during the session was adopted under a minted id and had no global
+                // id until now; after this save it does, and pinning it here is what makes the id
+                // survive the next reload.
+                var globalId = GetGlobalId(nodeId);
+                if (string.IsNullOrEmpty(globalId) && TryGetGlobalIdString(gameObject, out var fresh))
+                {
+                    _globalIdByNode[nodeId] = fresh;
+                    _nodeByGlobalId[fresh] = nodeId;
+                    globalId = fresh;
+                }
+
                 entries.Add(new NodeEntry
                 {
                     nodeId = nodeId,
-                    globalId = GetGlobalId(nodeId),
+                    globalId = globalId,
                     path = GetHierarchyPath(gameObject),
                     name = gameObject.name,
                 });

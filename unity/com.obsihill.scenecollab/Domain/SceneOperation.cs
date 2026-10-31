@@ -21,6 +21,18 @@ namespace SceneCollab.Domain
         public string OldValue;
         public string NewValue;
 
+        /// <summary>Parent of the object for <c>add_node</c> / <c>reparent</c> ("" = scene root).</summary>
+        public string ParentNodeId;
+
+        /// <summary>Sibling index for <c>add_node</c> / <c>reorder_children</c>; -1 when unspecified.</summary>
+        public int SiblingIndex;
+
+        /// <summary>Asset guid of the prefab to instantiate for <c>add_node</c> ("" = plain GameObject).</summary>
+        public string PrefabGuid;
+
+        /// <summary>Component type name for <c>add_component</c>.</summary>
+        public string ComponentType;
+
         /// <summary>
         /// Builds an op, or explains why it cannot be one. Failure here is a caller bug, not
         /// a user error, so the message names the field.
@@ -99,6 +111,10 @@ namespace SceneCollab.Domain
                 propertyPath = PropertyPath,
                 oldValue = OldValue,
                 newValue = NewValue,
+                parentNodeId = ParentNodeId,
+                siblingIndex = SiblingIndex,
+                prefabGuid = PrefabGuid,
+                componentType = ComponentType,
             };
         }
 

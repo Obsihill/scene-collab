@@ -7,6 +7,59 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-10-31
+
+Scene-level multiplayer. One editor hosts a scene, everyone else joins *that* scene by picking it
+from a list, and the host alone writes the file.
+
+### Added
+
+- **`GET /rooms`** lists the scenes currently open in a session: scene name, host name, participant
+  count. Token-authenticated; a missing or wrong token is a 401.
+- **Scene handshake.** `welcome` carries `sceneGuid`/`sceneName` and every participant now knows
+  whose scene it is. A client joining a session with a different scene GUID is refused with
+  `scene_mismatch` instead of silently editing a scene nobody else has.
+- **Structural operations**: `add_node`, `remove_node`, `reparent`, `reorder_children`,
+  `add_component`. The server relays them with `parentNodeId`, `siblingIndex`, `componentType` and
+  `prefabGuid` intact; the receiving editor rebuilds the object and binds the remote-issued node id
+  to it (`SceneNodeRegistry.BindExternalId`), so later edits on that object address it correctly.
+- **Node locks.** Any participant can claim a node id, and the server echoes the whole lock set to
+  everyone. A structural op on a locked node from someone else is rejected with `locked` rather than
+  applied.
+- **Asset manifest.** The host sends the scene's dependency GUID list; each client compares it with
+  its own `AssetDatabase` and reports what it is missing, by GUID, instead of guessing from a count.
+- **Host promotion.** When the host leaves, the participant who has been connected longest becomes
+  the new host and scribe, so saving continues without a manual re-host.
+- **Scene picker in the window** (`Editor/CollabRoomList.cs`): fetches `/rooms` over HTTP, shows the
+  open scenes, and connects to the selected one.
+- **Placeholder objects** (`CollabPlaceholders.cs`) for assets a client does not have: missing meshes
+  get a stand-in cube with a magenta material (Unity draws a mesh-less renderer as nothing at all),
+  missing prefabs get a transform stand-in, missing scripts get a marker component. All temporary
+  (`HideFlags.DontSave`).
+
+### Changed
+
+- The first participant is the host *and* the scribe; the scribe flag is no longer independent.
+- Structural ops are only accepted from the host. Everyone can still edit values.
+
+### Verified
+
+- `tools/SceneCollab.V03Probe` (new, .NET, no editor): 23 checks against a live server — room
+  listing and 401, host/scribe assignment, scene-GUID refusal, structural relay including
+  `parentNodeId`/`siblingIndex`/`componentType`/`prefabGuid`, lock broadcast to all participants,
+  non-host structural rejection, asset GUID delivery, host promotion. Three consecutive passes.
+- `LiveHarnessV03` + the probe's guest mode: a non-Unity peer added a `Guest Cube`, moved it to
+  `(2, 3, 4)` and removed it, and a headless Unity host applied all three — object present at that
+  position, node id bound, object gone afterwards.
+
+### Known gaps
+
+- Prefab instances are created and destroyed, but per-instance `m_Modifications` are not normalised;
+  an edit to a single prefab instance field is not replayed as an override diff yet.
+- `TerrainData` (heightmap, splatmap, trees, details) is not synchronised — terrain layers stay
+  host-only.
+- Lightmap baking, NavMesh baking and terrain LOD are host-side operations by design.
+
 ## [0.2.2] — 2026-10-31
 
 Verified against the published image, not just a local build: a headless Unity editor and a

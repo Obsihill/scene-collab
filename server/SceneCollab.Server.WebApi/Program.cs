@@ -98,12 +98,18 @@ app.Run(async context =>
         return;
     }
 
+    if (string.Equals(path, "/rooms", StringComparison.OrdinalIgnoreCase))
+    {
+        await WriteRoomsAsync(context);
+        return;
+    }
+
     if (path == "/" || path.Length == 0)
     {
         context.Response.ContentType = "text/plain; charset=utf-8";
         await context.Response.WriteAsync(
             "Scene Collab server " + serverVersion + "\nprotocol " + ProtocolVersion.Current
-            + "\nGET /health\nWS  /ws?room=<room>  (header X-SceneCollab-Token)\n");
+            + "\nGET /health\nGET /rooms\nWS  /ws?room=<room>  (header X-SceneCollab-Token)\n");
         return;
     }
 
@@ -171,6 +177,52 @@ async Task HandleWebSocketAsync(HttpContext context)
 
     log.LogInformation("disconnect room={Room} client={Client} peers={Peers}",
         roomKey, connection.ClientId, room.ConnectionCount);
+}
+
+async Task WriteRoomsAsync(HttpContext context)
+{
+    if (!IsAuthorized(context))
+    {
+        context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+        return;
+    }
+
+    var hub = context.RequestServices.GetRequiredService<SessionHub>();
+
+    // Rooms with no sockets are shells left behind by a finished session; listing them would show
+    // scenes nobody is editing and invite clients into a room with no host.
+    var rooms = hub.SnapshotRooms()
+        .Where(room => room.ConnectionCount > 0)
+        .OrderBy(room => room.Key, StringComparer.Ordinal)
+        .Select(room => new
+        {
+            room = room.Key,
+            sceneName = room.SceneName,
+            sceneGuid = room.SceneGuid,
+            host = room.HostDisplayName,
+            participants = room.ConnectionCount,
+            locks = room.LockCount,
+        })
+        .ToArray();
+
+    context.Response.ContentType = "application/json; charset=utf-8";
+    await context.Response.WriteAsync(JsonSerializer.Serialize(new { rooms }));
+}
+
+bool IsAuthorized(HttpContext context)
+{
+    if (string.IsNullOrWhiteSpace(accessToken))
+    {
+        return true;
+    }
+
+    var provided = context.Request.Headers["X-SceneCollab-Token"].ToString();
+    if (string.IsNullOrEmpty(provided))
+    {
+        provided = context.Request.Query["token"].ToString();
+    }
+
+    return FixedTimeEquals(provided, accessToken);
 }
 
 async Task WriteHealthAsync(HttpContext context)

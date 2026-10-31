@@ -16,29 +16,36 @@ Everyone else streams typed operations to the authoritative server.
 
 ## Status
 
-v0.2 moves **scene edits** between editors, verified both directions against a real server and a
-real second participant. Structural edits (add/remove/reparent) and prefab overrides are next — see
-the roadmap at the bottom of this file.
+v0.3 turns a connection into a **session**: one editor opens a scene and hosts it, everyone else picks
+that scene from a list, and only the host writes the file. Structural edits travel as well — objects
+appear, move in the hierarchy and disappear on every machine — and an object under restructure is
+locked so two people cannot fight over the same GameObject.
 
 | Part | State |
 |---|---|
-| Server: `/health`, token auth, room isolation, presence | done |
-| Operations: authoritative apply, broadcast, idempotent replay, conflict rejection | done (16 unit tests + live smoke test) |
-| Unity package: install, window, connect, presence list | done (36 EditMode tests, compiled on Unity 6000.6) |
-| Scene capture (`ObjectChangeEvents`) → `set_property` ops | done (position / rotation / scale / name) |
-| Op apply (`SerializedProperty`), echo guard, scribe save interception, `*.unity.ids.json` | done |
-| Structural ops, prefab `m_Modifications`, property ladders (components) | next |
+| Server: `/health`, `/rooms`, token auth, room isolation, presence, host promotion | done |
+| Operations: authoritative apply, broadcast, idempotent replay, conflict rejection, node locks | done (24 unit tests + probe) |
+| Unity package: install, window, scene picker, connect, presence, lock UI | done (36 EditMode tests, Unity 6000.6) |
+| Value ops (`set_property`): transform, name, active, enabled, component fields | done |
+| Structural ops: `add_node`, `remove_node`, `reparent`, `reorder_children`, `add_component` | done (host-only, lock-guarded) |
+| Asset manifest + placeholders for missing assets | done |
+| Prefab instance `m_Modifications`, `TerrainData` | not yet — see [roadmap](#roadmap) |
 
-Verified by `bash tools/live-run.sh`: it starts the server, a headless Unity editor and a Unity-free
-peer, moves a cube from the peer into the editor, then from the editor back into the peer, and exits
-non-zero unless both directions actually landed.
+Verified end to end, not by unit tests alone:
+
+- `tools/SceneCollab.V03Probe` — 23 checks against a live server with two WebSocket peers, no editor.
+- `LiveHarnessV03` — a Unity-free peer creates a cube in a headless Unity scene, moves it to
+  `(2, 3, 4)`, then deletes it; the editor asserts the object, its position, the node-id binding and
+  its removal.
+- `tools/live-run.sh` — value edits move in both directions.
+- 24 server tests, 36 EditMode tests.
 
 ## 1. Install the Unity package
 
 `Packages/manifest.json`:
 
 ```jsonc
-"com.obsihill.scenecollab": "https://github.com/Obsihill/scene-collab.git?path=unity/com.obsihill.scenecollab#v0.2.2"
+"com.obsihill.scenecollab": "https://github.com/Obsihill/scene-collab.git?path=unity/com.obsihill.scenecollab#v0.3.0"
 ```
 
 Then `Tools > Scene Collab`. Requires Unity **6000.0 or newer**.
@@ -57,17 +64,51 @@ behind a TLS-terminating proxy for anything beyond your LAN, and forward WebSock
 
 ## 3. Connect
 
-Window → server URL (`ws://localhost:8080/ws`) → access token → room name → **Connect**.
-First client in a room becomes the **scribe**; the scribe saves the scene to disk.
+Window → server URL (`ws://localhost:8080/ws`) → access token → **Refresh** the scene list → pick the
+scene someone already has open → **Connect**. If nobody has opened a scene yet, type a room name and
+connect first: **the first client hosts that scene**, everyone after it joins.
+
+The host is also the scribe: it saves the scene to disk. If the host disconnects, the participant who
+has been connected longest takes over, so saving does not stop. Everyone else's `Ctrl+S` is blocked
+with a warning rather than writing a diverging file.
 
 ---
 
+## What syncs, and what does not
+
+The honest version, by feature. "Host-only" means the op is refused unless the sender is the host.
+
+| Edit | Syncs? | Notes |
+|---|---|---|
+| Transform position / rotation / scale | yes | per channel, not per vector |
+| GameObject name, `activeSelf` | yes | |
+| Component `enabled` | yes | |
+| Component fields: `int`, `float`, `bool`, `string`, `enum`, `Vector2`, `Vector3`, `Quaternion`, `Color` | yes | any component, found by walking `SerializedProperty` |
+| Other field types: object/asset references, arrays and lists, `Vector4`, `Vector2Int`, `Vector3Int`, `Rect`, `Bounds`, `AnimationCurve`, `Gradient`, `LayerMask` | **no** | unsupported types are skipped silently on the sender |
+| Create / delete a GameObject | yes | host-only, needs the node-id lock |
+| Reparent, reorder children | yes | host-only, lock-guarded |
+| Add a component | yes | host-only, lock-guarded |
+| Remove a component | **no** | v0.4 |
+| Prefab instance field overrides (`m_Modifications`) | **no** | the object is created/removed, the diff is v0.4 |
+| Terrain heightmap / splatmap / trees / details | **no** | terrain stays host-only, v0.5 |
+| Materials and other **assets** | **no** | shared through Git, by design |
+| Lightmap bake, NavMesh bake, terrain LOD | **no** | host bakes and saves, then Git |
+| More than one scene per session | **no** | one active scene; a different scene GUID is refused |
+| Undo / redo | **no** | each editor's undo stack stays local |
+| Saving the scene | **host only** | other editors' saves are blocked with a warning |
+| Selection, camera, cursor, inspector focus | **no** | not modelled |
+
+Two participants editing the **same value** resolve last-writer-wins. Two participants restructuring
+the **same object** is prevented by the lock, not resolved after the fact.
+
 ## What this is not
 
-| Not supported (v0.1) | Why |
+| Not supported | Why |
 |---|---|
 | Editing one scene file simultaneously on disk | `SaveScene` rewrites the whole YAML and reassigns fileIDs — file-level merge cannot work |
-| Prefab **asset** live editing | Assets are not scene objects; v0.1 covers scene instances only |
+| Prefab **asset** live editing | Assets are not scene objects; this covers scene instances only |
+| Simultaneous editing of different scenes | A session is bound to one scene GUID |
+| Working without the host online | The server holds the operation log; there is no offline mode |
 | 100k-line monolithic scenes | Operation latency and resync cost; use additive scene splitting |
 | Working offline | The server is authoritative; there is no local op queue yet |
 
@@ -128,10 +169,14 @@ in `Packages/manifest.json`:
 
 ## Roadmap
 
-1. **v0.1** — connection layer (this release): protocol, server, package, tests.
+1. **v0.1** — connection layer: protocol, server, package, tests.
 2. **v0.2** — scene capture and apply for transform/name/active/enabled properties; scribe save.
-3. **v0.3** — structural ops under object lock; prefab instance overrides; `*.ids.json` sidecar.
-4. **v1.0** — first-run wizard (Lv1 host mode: server spawned locally, 6-digit code).
+3. **v0.3** — scene-level sessions: `/rooms` scene list, scene-GUID handshake, host = scribe, host
+   promotion, structural ops under object lock, component adds, asset manifest and placeholders.
+4. **v0.4** — prefab instance creation/removal and `m_Modifications` normalisation, component removal,
+   missing-script stubs, `samples~`.
+5. **v0.5** — `TerrainData` delta channel (stroke-sized region deltas, terrain lock).
+6. **v1.0** — first-run wizard (Lv1 host mode: server spawned locally, 6-digit code).
 
 ## License
 

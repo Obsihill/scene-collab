@@ -201,7 +201,7 @@ namespace SceneCollab.Editor.Tests
             var registry = new SceneNodeRegistry();
             var nodeId = registry.EnsureNodeId(cube);
             var diff = new SceneDiff();
-            var applier = new SceneOpApplier(registry, diff);
+            var applier = new SceneOpApplier(registry, diff, new SceneStructure(registry));
 
             diff.Baseline(cube, nodeId);
 
@@ -228,7 +228,7 @@ namespace SceneCollab.Editor.Tests
             SaveSceneWithCube("Unknown", out _);
             var registry = new SceneNodeRegistry();
             var diff = new SceneDiff();
-            var applier = new SceneOpApplier(registry, diff);
+            var applier = new SceneOpApplier(registry, diff, new SceneStructure(registry));
 
             var wire = new SceneCollab.Contracts.Protocol.WireMessage
             {
@@ -254,7 +254,7 @@ namespace SceneCollab.Editor.Tests
             var registry = new SceneNodeRegistry();
             var nodeId = registry.EnsureNodeId(cube);
             var diff = new SceneDiff();
-            var applier = new SceneOpApplier(registry, diff);
+            var applier = new SceneOpApplier(registry, diff, new SceneStructure(registry));
 
             diff.Baseline(cube, nodeId);
             cube.transform.localPosition = new Vector3(1f, 0f, 0f);

@@ -23,9 +23,11 @@ namespace SceneCollab.Editor
         CollabSettings _settings;
         ISceneCollabSession _session;
         SceneCollabSync _sync;
+        readonly CollabRoomList _roomList = new CollabRoomList();
         Vector2 _logScroll;
         string _tokenDraft;
         string _tokenNotice;
+        bool _roomsDirty;
 
         [MenuItem("Tools/Scene Collab", priority = 40)]
         public static void Open()
@@ -40,11 +42,30 @@ namespace SceneCollab.Editor
             _settings = CollabSettings.Load();
             _tokenDraft = CollabSettings.Token;
             Attach(new CollabSession());
+            EditorApplication.update += PollRooms;
         }
 
         void OnDisable()
         {
+            EditorApplication.update -= PollRooms;
+            _roomList.Cancel();
             Detach();
+        }
+
+        void PollRooms()
+        {
+            if (!_roomList.Poll())
+            {
+                return;
+            }
+
+            _roomsDirty = true;
+            Repaint();
+
+            if (!string.IsNullOrEmpty(_roomList.Error))
+            {
+                Log("room list: " + _roomList.Error);
+            }
         }
         void Attach(ISceneCollabSession session)
         {
@@ -91,7 +112,7 @@ namespace SceneCollab.Editor
 
             if (_session.State == CollabConnectionState.Connected)
             {
-                Log("connected as " + _session.ClientId + (_session.IsScribe ? " (scribe)" : "")
+                Log("connected as " + _session.ClientId + (_session.IsHost ? " (host)" : "")
                     + " · revision " + _session.Revision);
             }
             else if (_session.State == CollabConnectionState.Faulted)
@@ -149,6 +170,9 @@ namespace SceneCollab.Editor
                 EditorGUILayout.HelpBox(_tokenNotice, MessageType.Warning);
             }
 
+            EditorGUILayout.Space(4f);
+            DrawRooms(editable, connected, connecting);
+
             EditorGUILayout.Space(6f);
 
             using (new EditorGUILayout.HorizontalScope())
@@ -173,7 +197,12 @@ namespace SceneCollab.Editor
             EditorGUILayout.LabelField("State", _session.State.ToString());
             EditorGUILayout.LabelField("Client", string.IsNullOrEmpty(_session.ClientId) ? "—" : _session.ClientId);
             EditorGUILayout.LabelField("Revision", _session.Revision.ToString());
-            EditorGUILayout.LabelField("Scribe", _session.IsScribe ? "this editor" : "another participant");
+            EditorGUILayout.LabelField("Role", _session.IsHost
+                ? "host — this editor saves the scene"
+                : (_session.IsScribe ? "scribe" : "guest"));
+            EditorGUILayout.LabelField("Scene", string.IsNullOrEmpty(_session.SceneName)
+                ? "—"
+                : _session.SceneName + (string.IsNullOrEmpty(_session.SceneGuid) ? "" : "  [" + ShortGuid(_session.SceneGuid) + "]"));
 
             EditorGUILayout.Space(6f);
             EditorGUILayout.LabelField("Scene sync", EditorStyles.boldLabel);
@@ -193,15 +222,45 @@ namespace SceneCollab.Editor
             if (_sync != null)
             {
                 EditorGUILayout.LabelField("Known nodes", _sync.KnownNodes.ToString());
+                EditorGUILayout.LabelField("Structure sent", _sync.StructureSent.ToString());
+                EditorGUILayout.LabelField("Held by lock", _sync.LocksSkipped.ToString());
                 EditorGUILayout.LabelField("Sent / rejected", _sync.Sent + " / " + _sync.Rejected);
                 EditorGUILayout.LabelField("Applied / ignored", _sync.Applied + " / " + _sync.Ignored);
                 EditorGUILayout.LabelField("Last", string.IsNullOrEmpty(_sync.LastNote) ? "—" : _sync.LastNote);
+
+                if (!string.IsNullOrEmpty(_sync.AssetNote))
+                {
+                    EditorGUILayout.HelpBox(_sync.AssetNote + " — magenta boxes mark what this "
+                        + "checkout cannot resolve. They are not saved.", MessageType.Warning);
+                }
+
+                if (connected)
+                {
+                    using (new EditorGUILayout.HorizontalScope())
+                    {
+                        if (GUILayout.Button("Lock selection"))
+                        {
+                            SendLockOnSelection(true);
+                        }
+
+                        if (GUILayout.Button("Unlock selection"))
+                        {
+                            SendLockOnSelection(false);
+                        }
+                    }
+
+                    if (_session.IsHost && GUILayout.Button("Publish asset manifest"))
+                    {
+                        _sync.PublishManifest();
+                        Log(_sync.LastNote);
+                    }
+                }
 
                 if (_sync.Overwritten > 0)
                 {
                     EditorGUILayout.HelpBox(
                         _sync.Overwritten + " remote change(s) landed on a value you had also changed. "
-                        + "Last writer wins on scalars; object-level locks are the fix and arrive in v0.3.",
+                        + "Scalars are last-writer-wins; lock an object before restructuring it.",
                         MessageType.Warning);
                 }
             }
@@ -235,6 +294,95 @@ namespace SceneCollab.Editor
             }
 
             EditorGUILayout.EndScrollView();
+        }
+
+        void DrawRooms(bool editable, bool connected, bool connecting)
+        {
+            EditorGUILayout.LabelField("Scenes on this server", EditorStyles.boldLabel);
+
+            using (new EditorGUILayout.HorizontalScope())
+            {
+                using (new EditorGUI.DisabledScope(_roomList.Busy))
+                {
+                    if (GUILayout.Button(_roomList.Busy ? "Loading…" : "Refresh"))
+                    {
+                        _roomList.Refresh(_settings.serverUrl, CollabSettings.Token);
+                    }
+                }
+
+                if (!string.IsNullOrEmpty(_roomList.Error))
+                {
+                    EditorGUILayout.LabelField(_roomList.Error, EditorStyles.miniLabel);
+                }
+            }
+
+            var rooms = _roomList.Rooms;
+            if (rooms.Count == 0)
+            {
+                EditorGUILayout.LabelField("nobody is hosting a scene right now", EditorStyles.miniLabel);
+                return;
+            }
+
+            for (var i = 0; i < rooms.Count; i++)
+            {
+                var room = rooms[i];
+                var same = CollabRoomList.MatchesActiveScene(room);
+
+                using (new EditorGUILayout.HorizontalScope())
+                {
+                    var label = (string.IsNullOrEmpty(room.sceneName) ? "(unnamed scene)" : room.sceneName)
+                        + " · " + room.room
+                        + " · " + (string.IsNullOrEmpty(room.host) ? "?" : room.host)
+                        + " · " + room.participants + " here"
+                        + (same ? "" : "  [other scene]");
+
+                    EditorGUILayout.LabelField(label, EditorStyles.miniLabel);
+
+                    using (new EditorGUI.DisabledScope(!editable || !same))
+                    {
+                        if (GUILayout.Button(connected ? "join" : "join", GUILayout.Width(48f)))
+                        {
+                            _settings.room = room.room;
+                            _settings.Save();
+                            Log("room set to " + room.room + " — press Connect");
+                        }
+                    }
+                }
+            }
+        }
+
+        void SendLockOnSelection(bool acquire)
+        {
+            if (!acquire)
+            {
+                var locked = _session.LockedNodeIds;
+                for (var i = 0; i < locked.Length; i++)
+                {
+                    _session.SendLock(locked[i], true);
+                }
+
+                Log("released " + locked.Length + " lock(s)");
+                return;
+            }
+
+            var selection = Selection.gameObjects;
+            var sent = 0;
+            for (var i = 0; i < selection.Length; i++)
+            {
+                string nodeId;
+                if (_sync.Registry.TryGetNodeId(selection[i], out nodeId) && !string.IsNullOrEmpty(nodeId))
+                {
+                    _session.SendLock(nodeId, false);
+                    sent++;
+                }
+            }
+
+            Log("requested " + sent + " lock(s)");
+        }
+
+        static string ShortGuid(string guid)
+        {
+            return string.IsNullOrEmpty(guid) || guid.Length <= 8 ? guid : guid.Substring(0, 8);
         }
 
         void ConnectPressed()

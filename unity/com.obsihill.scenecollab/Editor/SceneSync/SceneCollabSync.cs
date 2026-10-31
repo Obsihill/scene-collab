@@ -26,6 +26,7 @@ namespace SceneCollab.Editor.SceneSync
         readonly SceneNodeRegistry _registry = new SceneNodeRegistry();
         readonly SceneDiff _diff = new SceneDiff();
         readonly SceneChangeFeed _feed = new SceneChangeFeed();
+        readonly SceneStructure _structure;
         readonly SceneOpApplier _applier;
         readonly Queue<SceneOperation> _outbox = new Queue<SceneOperation>();
         readonly List<GameObject> _dirty = new List<GameObject>();
@@ -38,7 +39,8 @@ namespace SceneCollab.Editor.SceneSync
 
         public SceneCollabSync()
         {
-            _applier = new SceneOpApplier(_registry, _diff);
+            _structure = new SceneStructure(_registry);
+            _applier = new SceneOpApplier(_registry, _diff, _structure);
             _feed.UndoRedoPerformed += OnUndoRedo;
         }
 
@@ -90,6 +92,22 @@ namespace SceneCollab.Editor.SceneSync
             get { return _applier; }
         }
 
+        public SceneStructure Structure
+        {
+            get { return _structure; }
+        }
+
+        /// <summary>Structural ops (adds, removes, moves) sent this session.</summary>
+        public int StructureSent { get; private set; }
+
+        /// <summary>Structural ops held back because a peer holds the lock.</summary>
+        public int LocksSkipped { get; private set; }
+
+        /// <summary>Assets in the host's manifest that this machine cannot resolve.</summary>
+        public int MissingAssets { get; private set; }
+
+        public string AssetNote { get; private set; }
+
         public void Bind(ISceneCollabSession session)
         {
             if (ReferenceEquals(_session, session))
@@ -108,6 +126,8 @@ namespace SceneCollab.Editor.SceneSync
             _session.OperationReceived += OnOperationReceived;
             _session.OperationAcknowledged += OnOperationAcknowledged;
             _session.StateChanged += OnStateChanged;
+            _session.LocksChanged += OnLocksChanged;
+            _session.AssetManifestChanged += OnAssetManifestChanged;
         }
 
         public void Unbind()
@@ -117,6 +137,8 @@ namespace SceneCollab.Editor.SceneSync
                 _session.OperationReceived -= OnOperationReceived;
                 _session.OperationAcknowledged -= OnOperationAcknowledged;
                 _session.StateChanged -= OnStateChanged;
+                _session.LocksChanged -= OnLocksChanged;
+                _session.AssetManifestChanged -= OnAssetManifestChanged;
             }
 
             _session = null;
@@ -204,6 +226,7 @@ namespace SceneCollab.Editor.SceneSync
                 }
 
                 _diff.Baseline(gameObject, nodeId);
+                _structure.Baseline(gameObject, nodeId);
                 primed++;
             }
 
@@ -222,6 +245,7 @@ namespace SceneCollab.Editor.SceneSync
                 if (nodeId != null)
                 {
                     _diff.Collect(gameObject, nodeId);
+                    _structure.Baseline(gameObject, nodeId);
                 }
             }
         }
@@ -270,6 +294,11 @@ namespace SceneCollab.Editor.SceneSync
                     continue;
                 }
 
+                if (BlockedByLock(nodeId))
+                {
+                    continue;
+                }
+
                 var operations = _diff.Collect(gameObject, nodeId);
                 for (var j = 0; j < operations.Count; j++)
                 {
@@ -277,7 +306,146 @@ namespace SceneCollab.Editor.SceneSync
                 }
             }
 
+            if (_feed.StructureDirty)
+            {
+                CollectStructure();
+            }
+
             PumpOutbox();
+        }
+
+        /// <summary>
+        /// Turns structural changes into ops, in an order a peer can apply without referring to
+        /// something it does not have yet: removals, then creations (the hierarchy walk always visits a
+        /// parent before its children), then moves.
+        /// </summary>
+        public void CollectStructure()
+        {
+            var scene = SceneManager.GetActiveScene();
+            if (!scene.IsValid() || !scene.isLoaded)
+            {
+                return;
+            }
+
+            var removed = _structure.DetectRemoved();
+            for (var i = 0; i < removed.Count; i++)
+            {
+                var nodeId = removed[i];
+                if (BlockedByLock(nodeId))
+                {
+                    continue;
+                }
+
+                _diff.Forget(nodeId);
+                var removeOp = _structure.BuildRemove(nodeId, "");
+                _outbox.Enqueue(removeOp);
+                StructureSent++;
+                LastNote = "removed node " + nodeId;
+            }
+
+            var added = _structure.DetectUnregistered(scene);
+            for (var i = 0; i < added.Count; i++)
+            {
+                var gameObject = added[i];
+                if (gameObject == null)
+                {
+                    continue;
+                }
+
+                var nodeId = SceneStructure.NewNodeId();
+                bool created;
+                var addOp = _structure.BuildAdd(gameObject, nodeId, out created);
+                if (!created)
+                {
+                    // The parent is not in the session yet; the next sweep picks this object up.
+                    continue;
+                }
+
+                _diff.Baseline(gameObject, nodeId);
+                _outbox.Enqueue(addOp);
+                StructureSent++;
+                LastNote = "added " + gameObject.name;
+            }
+
+            foreach (var gameObject in SceneNodeRegistry.EnumerateSceneObjects(scene))
+            {
+                if (gameObject == null)
+                {
+                    continue;
+                }
+
+                string nodeId;
+                if (!_registry.TryGetNodeId(gameObject, out nodeId) || string.IsNullOrEmpty(nodeId))
+                {
+                    continue;
+                }
+
+                if (BlockedByLock(nodeId))
+                {
+                    continue;
+                }
+
+                SceneOperation moveOp;
+                if (_structure.TryCollectMove(gameObject, nodeId, out moveOp))
+                {
+                    _outbox.Enqueue(moveOp);
+                    StructureSent++;
+                    LastNote = "moved " + gameObject.name;
+                }
+            }
+        }
+
+        bool BlockedByLock(string nodeId)
+        {
+            if (_session == null || string.IsNullOrEmpty(nodeId) || !_session.IsLockedByOther(nodeId))
+            {
+                return false;
+            }
+
+            LocksSkipped++;
+            LastNote = "locked by a peer: " + nodeId;
+            return true;
+        }
+
+        /// <summary>Host only: tell the room which assets the scene needs.</summary>
+        public bool PublishManifest()
+        {
+            if (_session == null || _session.State != CollabConnectionState.Connected || !_session.IsHost)
+            {
+                return false;
+            }
+
+            var scene = SceneManager.GetActiveScene();
+            if (!scene.IsValid() || string.IsNullOrEmpty(scene.path))
+            {
+                return false;
+            }
+
+            var guids = SceneIdentity.CollectAssetGuids(scene.path, 4096);
+            if (!_session.PublishAssets(guids))
+            {
+                return false;
+            }
+
+            LastNote = "published " + guids.Length + " asset guid(s)";
+            return true;
+        }
+
+        /// <summary>Any client: compare the manifest against this machine and stand in placeholders.</summary>
+        public void RefreshAssetHealth()
+        {
+            if (_session == null || _session.AssetGuids == null || _session.AssetGuids.Length == 0)
+            {
+                return;
+            }
+
+            var missing = SceneIdentity.Missing(_session.AssetGuids);
+            MissingAssets = missing.Length;
+
+            var scene = SceneManager.GetActiveScene();
+            var health = CollabAssetHealth.Scan(scene, missing);
+            AssetNote = CollabPlaceholders.Describe(missing.Length, health.MissingScripts);
+            LastNote = AssetNote ?? (MissingAssets + " missing asset(s)");
         }
 
         void PumpOutbox()
@@ -359,6 +527,21 @@ namespace SceneCollab.Editor.SceneSync
             {
                 PrimeActiveScene();
             }
+
+            if (_session != null && _session.State == CollabConnectionState.Connected && Enabled && _session.IsHost)
+            {
+                PublishManifest();
+            }
+        }
+
+        void OnLocksChanged()
+        {
+            LastNote = "locks: " + (_session == null ? 0 : _session.LockedNodeIds.Length);
+        }
+
+        void OnAssetManifestChanged()
+        {
+            RefreshAssetHealth();
         }
 
         void UpdateSaveGuard()
@@ -366,7 +549,7 @@ namespace SceneCollab.Editor.SceneSync
             SceneSaveGuard.BlockNonScribeSaves =
                 Enabled && _session != null
                 && _session.State == CollabConnectionState.Connected
-                && !_session.IsScribe;
+                && !_session.IsHost;
         }
 
         void OnSceneSaved(Scene scene)

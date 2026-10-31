@@ -30,6 +30,30 @@ namespace SceneCollab.Editor
         /// <summary>True for the one participant allowed to write the scene into Git.</summary>
         bool IsScribe { get; }
 
+        /// <summary>
+        /// True when this editor opened the scene and therefore owns it: it is the only one allowed to
+        /// save, and the room is bound to its scene.
+        /// </summary>
+        bool IsHost { get; }
+
+        /// <summary>Guid of the scene this room edits, as announced by the server.</summary>
+        string SceneGuid { get; }
+
+        string ScenePath { get; }
+
+        string SceneName { get; }
+
+        /// <summary>Node ids that are currently locked by a participant.</summary>
+        string[] LockedNodeIds { get; }
+
+        /// <summary>Asset guids the host's scene depends on; empty until the host publishes them.</summary>
+        string[] AssetGuids { get; }
+
+        /// <summary>Number of assets in the host's manifest (0 before the first publish).</summary>
+        int AssetCount { get; }
+
+        bool IsLockedByOther(string nodeId);
+
         /// <summary>Last revision this editor has applied.</summary>
         long Revision { get; }
 
@@ -53,6 +77,12 @@ namespace SceneCollab.Editor
         /// <summary>Rejection or protocol error: code from <see cref="ErrorCodes"/>, human text.</summary>
         event Action<string, string> ErrorReceived;
 
+        /// <summary>The room's lock set changed (someone locked, unlocked, or left).</summary>
+        event Action LocksChanged;
+
+        /// <summary>The host published a new asset manifest.</summary>
+        event Action AssetManifestChanged;
+
         void Connect(CollabSettings settings);
 
         void Disconnect();
@@ -62,5 +92,14 @@ namespace SceneCollab.Editor
         /// did not reach anyone", not as a retryable hiccup.
         /// </summary>
         bool SendOperation(SceneCollab.Domain.SceneOperation operation);
+
+        /// <summary>Requests or releases the edit lock on a node.</summary>
+        bool SendLock(string nodeId, bool release);
+
+        /// <summary>Tells the room how many assets the host's scene needs (host only).</summary>
+        bool PublishAssetCount(int count);
+
+        /// <summary>Publishes the host's full asset manifest so peers can flag what they lack.</summary>
+        bool PublishAssets(string[] assetGuids);
     }
 }

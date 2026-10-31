@@ -84,6 +84,51 @@ namespace SceneCollab.Contracts.Protocol
 
         /// <summary>True when an op was accepted but had already been applied (idempotent replay).</summary>
         public bool duplicate;
+
+        // ── v0.3: scene identity, host role, locks, structural payloads ──────────
+
+        /// <summary>
+        /// GUID of the scene being edited. Sent on <c>hello</c>; the server binds the room to the
+        /// first scene it sees and refuses anyone editing a different one. Without this a client that
+        /// opened the wrong scene joined silently and its ops were dropped node by node.
+        /// </summary>
+        public string sceneGuid;
+
+        /// <summary>Project-relative scene path, for the room list and error messages.</summary>
+        public string scenePath;
+
+        /// <summary>Scene asset name without extension, shown in the room list.</summary>
+        public string sceneName;
+
+        /// <summary>True for the participant that opened the scene and owns saving (the host).</summary>
+        public bool isHost;
+
+        /// <summary>Node a <c>lock</c>/<c>unlock</c> message refers to.</summary>
+        public string lockNodeId;
+
+        /// <summary>Every node currently locked in the room, broadcast with the lock change.</summary>
+        public string[] lockedNodeIds;
+
+        /// <summary>Parent node for a structural op; empty string means the scene root.</summary>
+        public string parentNodeId;
+
+        /// <summary>Sibling index inside the parent, used by <c>add_node</c> and <c>reorder_children</c>.</summary>
+        public int siblingIndex;
+
+        /// <summary>Component type name for <c>add_component</c>.</summary>
+        public string componentType;
+
+        /// <summary>
+        /// Asset GUID a created object was made from (prefab, model). Empty for a plain GameObject.
+        /// GUIDs, never paths: a path is machine-specific and a missing asset must be detectable.
+        /// </summary>
+        public string prefabGuid;
+
+        /// <summary>Asset GUIDs referenced by the host's copy of the scene (asset manifest).</summary>
+        public string[] assetGuids;
+
+        /// <summary>Number of assets the host's scene depends on; sent with the manifest.</summary>
+        public int assetCount;
     }
 
     /// <summary>
@@ -96,6 +141,9 @@ namespace SceneCollab.Contracts.Protocol
         public string displayName;
         public string color;
         public bool isScribe;
+
+        /// <summary>True for the participant that owns the scene and is the only one allowed to save.</summary>
+        public bool isHost;
 
         /// <summary>Node ids the participant currently has selected. Used for the "someone else is here" highlight.</summary>
         public string[] selectedNodeIds;

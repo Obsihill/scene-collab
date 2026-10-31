@@ -11,6 +11,14 @@ namespace SceneCollab.Contracts.Protocol
         public const string Error = "error";
         public const string Ping = "ping";
         public const string Pong = "pong";
+
+        /// <summary>Client asks for (or releases) the edit lock on a node; the server echoes the full lock set.</summary>
+        public const string Lock = "lock";
+
+        public const string Unlock = "unlock";
+
+        /// <summary>Host publishes the asset GUIDs its copy of the scene depends on.</summary>
+        public const string Assets = "assets";
     }
 
     /// <summary>Values for <see cref="WireMessage.code"/>.</summary>
@@ -22,6 +30,15 @@ namespace SceneCollab.Contracts.Protocol
         public const string NotInitialized = "not_initialized";
         public const string Malformed = "malformed";
         public const string RoomFull = "room_full";
+
+        /// <summary>The room is bound to a different scene than the one this client has open.</summary>
+        public const string SceneMismatch = "scene_mismatch";
+
+        /// <summary>Another participant holds the edit lock on this node.</summary>
+        public const string Locked = "locked";
+
+        /// <summary>Only the host may perform this action (saving, publishing the asset manifest).</summary>
+        public const string NotHost = "not_host";
     }
 
     /// <summary>

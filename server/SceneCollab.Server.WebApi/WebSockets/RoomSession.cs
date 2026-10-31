@@ -23,6 +23,14 @@ namespace SceneCollab.Server.WebApi.WebSockets
         readonly Dictionary<string, ClientConnection> _clients =
             new Dictionary<string, ClientConnection>(StringComparer.Ordinal);
 
+        int _assetCount;
+
+        // The host's asset guid list, kept so late joiners learn it in their welcome instead of
+        // waiting for the next manifest push.
+        string[] _assetGuids = new string[0];
+
+        const int MaxAssetGuids = 8192;
+
         public RoomSession(string key)
         {
             Key = key;
@@ -36,6 +44,44 @@ namespace SceneCollab.Server.WebApi.WebSockets
         public int ConnectionCount
         {
             get { lock (_gate) { return _clients.Count; } }
+        }
+
+        public int LockCount
+        {
+            get { return State.SnapshotLocks().Length; }
+        }
+
+        public string SceneName
+        {
+            get { return State.SceneName; }
+        }
+
+        public string SceneGuid
+        {
+            get { return State.SceneGuid; }
+        }
+
+        public string HostDisplayName
+        {
+            get
+            {
+                var hostId = State.HostClientId;
+                if (string.IsNullOrEmpty(hostId))
+                {
+                    return null;
+                }
+
+                var roster = State.SnapshotParticipants();
+                for (var i = 0; i < roster.Length; i++)
+                {
+                    if (string.Equals(roster[i].clientId, hostId, StringComparison.Ordinal))
+                    {
+                        return roster[i].displayName;
+                    }
+                }
+
+                return null;
+            }
         }
 
         public async Task HandleAsync(WebSocket socket, ClientConnection connection, CancellationToken cancellationToken)
@@ -120,6 +166,18 @@ namespace SceneCollab.Server.WebApi.WebSockets
 
                             break;
 
+                        case MessageTypes.Lock:
+                            await HandleLockAsync(connection, message, false, cancellationToken).ConfigureAwait(false);
+                            break;
+
+                        case MessageTypes.Unlock:
+                            await HandleLockAsync(connection, message, true, cancellationToken).ConfigureAwait(false);
+                            break;
+
+                        case MessageTypes.Assets:
+                            await HandleAssetsAsync(connection, message, cancellationToken).ConfigureAwait(false);
+                            break;
+
                         default:
                             await SendErrorAsync(connection, ErrorCodes.Malformed, "unknown type " + message.type, cancellationToken)
                                 .ConfigureAwait(false);
@@ -153,6 +211,19 @@ namespace SceneCollab.Server.WebApi.WebSockets
 
             connection.DisplayName = SanitizeName(message.displayName, connection.ClientId);
 
+            // The room is bound to the scene the host opened. A client with a different scene open is
+            // refused here instead of joining and having every op silently miss its node.
+            string conflict;
+            if (!State.TryBindScene(message.sceneGuid, message.scenePath, message.sceneName, out conflict))
+            {
+                await SendErrorAsync(connection, ErrorCodes.SceneMismatch, conflict, cancellationToken)
+                    .ConfigureAwait(false);
+                await connection
+                    .CloseAsync(WebSocketCloseStatus.PolicyViolation, ErrorCodes.SceneMismatch, cancellationToken)
+                    .ConfigureAwait(false);
+                return false;
+            }
+
             var participant = State.Join(connection.ClientId, connection.DisplayName, message.color);
             connection.Color = participant.color;
 
@@ -171,6 +242,13 @@ namespace SceneCollab.Server.WebApi.WebSockets
                 room = Key,
                 revision = State.Revision,
                 isScribe = participant.isScribe,
+                isHost = participant.isHost,
+                sceneGuid = State.SceneGuid,
+                scenePath = State.ScenePath,
+                sceneName = State.SceneName,
+                lockedNodeIds = State.SnapshotLocks(),
+                assetCount = _assetCount,
+                assetGuids = _assetGuids,
                 participants = State.SnapshotParticipants(),
                 serverTime = Now(),
             };
@@ -225,6 +303,10 @@ namespace SceneCollab.Server.WebApi.WebSockets
                 propertyPath = record.PropertyPath,
                 oldValue = record.OldValue,
                 newValue = record.NewValue,
+                parentNodeId = message.parentNodeId,
+                siblingIndex = message.siblingIndex,
+                componentType = message.componentType,
+                prefabGuid = message.prefabGuid,
                 revision = record.Revision,
                 room = Key,
                 serverTime = record.TimestampUnixMs,
@@ -232,6 +314,79 @@ namespace SceneCollab.Server.WebApi.WebSockets
 
             await BroadcastAsync(WireJson.Serialize(broadcast), connection.ClientId, cancellationToken)
                 .ConfigureAwait(false);
+        }
+
+        async Task HandleAssetsAsync(ClientConnection connection, WireMessage message, CancellationToken cancellationToken)
+        {
+            if (!string.Equals(State.HostClientId, connection.ClientId, StringComparison.Ordinal))
+            {
+                await SendErrorAsync(connection, ErrorCodes.NotHost, "only the host publishes the asset manifest",
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                return;
+            }
+
+            _assetGuids = message.assetGuids ?? new string[0];
+            if (_assetGuids.Length > MaxAssetGuids)
+            {
+                _assetGuids = _assetGuids[..MaxAssetGuids];
+            }
+
+            _assetCount = _assetGuids.Length > 0
+                ? _assetGuids.Length
+                : message.assetCount;
+
+            // The guid list crosses the wire, not just the count: a client can only decide "I am missing
+            // this mesh" by resolving each guid against its own AssetDatabase.
+            var notice = new WireMessage
+            {
+                type = MessageTypes.Assets,
+                room = Key,
+                assetGuids = _assetGuids,
+                assetCount = _assetCount,
+                isHost = true,
+                revision = State.Revision,
+                serverTime = Now(),
+            };
+
+            await BroadcastAsync(WireJson.Serialize(notice), connection.ClientId, cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        async Task HandleLockAsync(ClientConnection connection, WireMessage message, bool release, CancellationToken cancellationToken)
+        {
+            var nodeId = message.lockNodeId;
+
+            if (release)
+            {
+                State.Unlock(connection.ClientId, nodeId);
+            }
+            else
+            {
+                string owner;
+                if (!State.TryLock(connection.ClientId, nodeId, out owner))
+                {
+                    await SendErrorAsync(connection, ErrorCodes.Locked, "node is locked by " + owner, cancellationToken)
+                        .ConfigureAwait(false);
+                    return;
+                }
+            }
+
+            // Everyone, including the requester, gets the full lock set: incremental lock deltas are a
+            // reliable way to end up with divergent lock state after one missed frame.
+            var broadcast = new WireMessage
+            {
+                type = release ? MessageTypes.Unlock : MessageTypes.Lock,
+                room = Key,
+                lockNodeId = nodeId,
+                clientId = connection.ClientId,
+                displayName = connection.DisplayName,
+                lockedNodeIds = State.SnapshotLocks(),
+                revision = State.Revision,
+                serverTime = Now(),
+            };
+
+            await BroadcastAsync(WireJson.Serialize(broadcast), null, cancellationToken).ConfigureAwait(false);
         }
 
         public async Task BroadcastPresenceAsync(string exceptClientId, CancellationToken cancellationToken)

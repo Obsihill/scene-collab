@@ -20,6 +20,8 @@ namespace SceneCollab.Editor.SceneSync
         readonly Dictionary<string, Dictionary<string, string>> _snapshot =
             new Dictionary<string, Dictionary<string, string>>();
 
+        readonly List<string> _paths = new List<string>();
+
         public int TrackedNodes
         {
             get { return _snapshot.Count; }
@@ -34,9 +36,11 @@ namespace SceneCollab.Editor.SceneSync
             }
 
             var values = GetOrCreate(nodeId);
-            for (var i = 0; i < ScenePropertyAccess.TrackedPaths.Length; i++)
+            GatherPaths(gameObject);
+
+            for (var i = 0; i < _paths.Count; i++)
             {
-                var path = ScenePropertyAccess.TrackedPaths[i];
+                var path = _paths[i];
                 string value;
                 if (ScenePropertyAccess.TryRead(gameObject, path, out value))
                 {
@@ -59,10 +63,11 @@ namespace SceneCollab.Editor.SceneSync
             }
 
             var values = GetOrCreate(nodeId);
+            GatherPaths(gameObject);
 
-            for (var i = 0; i < ScenePropertyAccess.TrackedPaths.Length; i++)
+            for (var i = 0; i < _paths.Count; i++)
             {
-                var path = ScenePropertyAccess.TrackedPaths[i];
+                var path = _paths[i];
 
                 string current;
                 if (!ScenePropertyAccess.TryRead(gameObject, path, out current))
@@ -136,6 +141,18 @@ namespace SceneCollab.Editor.SceneSync
         public void Clear()
         {
             _snapshot.Clear();
+        }
+
+        /// <summary>Every path we compare for one object: the built-ins plus its component fields.</summary>
+        void GatherPaths(GameObject gameObject)
+        {
+            _paths.Clear();
+            for (var i = 0; i < ScenePropertyAccess.TrackedPaths.Length; i++)
+            {
+                _paths.Add(ScenePropertyAccess.TrackedPaths[i]);
+            }
+
+            SceneComponentFields.CollectPaths(gameObject, _paths);
         }
 
         Dictionary<string, string> GetOrCreate(string nodeId)

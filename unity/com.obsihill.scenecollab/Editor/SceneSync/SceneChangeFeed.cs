@@ -19,6 +19,14 @@ namespace SceneCollab.Editor.SceneSync
 
         public bool IsAttached { get; private set; }
 
+        /// <summary>
+        /// True when the hierarchy itself changed since the last <see cref="Drain"/>: objects added,
+        /// removed, re-parented or reordered. Property modifications cannot report this reliably —
+        /// an undo of a creation carries no property modification at all — so the feed listens to
+        /// <c>EditorApplication.hierarchyChanged</c> instead of guessing.
+        /// </summary>
+        public bool StructureDirty { get; private set; }
+
         /// <summary>Raised after an undo/redo, when every tracked object must be re-read.</summary>
         public event System.Action UndoRedoPerformed;
 
@@ -31,6 +39,7 @@ namespace SceneCollab.Editor.SceneSync
 
             Undo.postprocessModifications += OnPostprocessModifications;
             Undo.undoRedoPerformed += OnUndoRedo;
+            EditorApplication.hierarchyChanged += OnHierarchyChanged;
             IsAttached = true;
         }
 
@@ -43,7 +52,9 @@ namespace SceneCollab.Editor.SceneSync
 
             Undo.postprocessModifications -= OnPostprocessModifications;
             Undo.undoRedoPerformed -= OnUndoRedo;
+            EditorApplication.hierarchyChanged -= OnHierarchyChanged;
             IsAttached = false;
+            StructureDirty = false;
             _dirty.Clear();
         }
 
@@ -58,6 +69,8 @@ namespace SceneCollab.Editor.SceneSync
         /// <summary>Hands over the objects touched since the last call and clears the set.</summary>
         public void Drain(List<GameObject> into)
         {
+            StructureDirty = false;
+
             if (_dirty.Count == 0)
             {
                 return;
@@ -102,6 +115,11 @@ namespace SceneCollab.Editor.SceneSync
 
             // Always return the array untouched: filtering here would cancel the user's edit.
             return modifications;
+        }
+
+        void OnHierarchyChanged()
+        {
+            StructureDirty = true;
         }
 
         void OnUndoRedo()

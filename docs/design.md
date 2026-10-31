@@ -35,6 +35,25 @@ Only the **scribe** — the first participant in the room — calls `SaveScene` 
 Everyone else's `Ctrl+S` is intercepted. This is not a limitation to remove later; it is the
 reason two people can work in one scene and still produce one clean commit.
 
+## 3-1. One scene, one host (v0.3)
+
+"Everyone edits the same file" is a lie the protocol cannot support, so v0.3 makes the session
+explicit instead:
+
+- A room is bound to **one scene GUID**. A client with a different scene open is refused at `hello`
+  (`scene_mismatch`) rather than being allowed to edit a document it cannot see. Before this, a
+  second editor with a different scene silently received ops for objects it did not have.
+- The room's **first participant is the host**, and the host is the scribe. Host and scribe are no
+  longer independent: two roles that could disagree produced a state where nobody was allowed to
+  save.
+- The scene's identity lives in the room, not in a config file, so joining is "pick the scene someone
+  has open" — `GET /rooms`, then connect. The client does not need to be told a room name.
+- Host departure **promotes the longest-connected participant**, not the oldest client id. The
+  surviving session continues with the same scene and revision; there is no re-host step.
+
+Structural ops stayed in this release because they were the one thing that made "several people
+editing a scene" feel false: you could move a cube together but not add one.
+
 ## 4. Stable ids
 
 `GlobalObjectId` (scene GUID + fileID + prefab context) is hashed with FNV-1a into a 16-char
@@ -42,12 +61,17 @@ node id. `Foo.unity.ids.json` is the sidecar repair table for renames and for th
 collision; it is committed. A hidden in-scene `__CollabIds` object was rejected: it ships into
 builds and breaks on Missing Script.
 
-## 5. What v0.1 does not do
+## 5. What this does not do
 
 | Not supported | Reason |
 |---|---|
 | Simultaneous editing of one file on disk | §1 |
-| Live prefab **asset** editing | assets are not scene objects; out of scope for v0.1 |
+| Live prefab **asset** editing | assets are not scene objects; out of scope |
+| Prefab instance field overrides (`m_Modifications`) | normalising one instance's diff into a stable override array is v0.4; creating and deleting instances works |
+| Component removal | v0.4 |
+| `TerrainData` (heightmap/splatmap/trees/details) | a 1024² layer is megabytes; needs stroke-sized region deltas — v0.5 |
+| Object/asset reference fields, arrays, `AnimationCurve`, `Gradient` | the value codec covers scalars, vectors, colour, enum, string only |
+| Undo across editors | each editor's undo stack is local; undoing someone else's edit is not modelled |
 | 100k+ line monolithic scenes | op latency + resync cost; split scenes additively |
 | Offline editing | the server is authoritative; no local op queue yet |
 | Non-Unity clients | the op vocabulary is Unity's serialisation model |
@@ -69,3 +93,5 @@ builds and breaks on Missing Script.
 | Package ↔ server protocol skew | `ProtocolVersion` range check at `hello`; both released from one tag |
 | Prefab override normalisation (`m_Modifications` ordering) | W1 acceptance test: apply → save → normalised YAML diff must be zero; if it fails, v0.1 restricts prefab instances to transform/name |
 | Large scenes | measure before promising; scene splitting guidance in README |
+| A client missing assets | host publishes the dependency GUID list, the client reports the gap and substitutes a placeholder; a missing mesh would otherwise render as **nothing at all** in Unity |
+| Host leaves mid-edit | longest-connected promotion, `welcome` re-sent to everyone; ops in flight are replayed idempotently by `opId` |

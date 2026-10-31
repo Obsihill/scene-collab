@@ -29,6 +29,11 @@ namespace SceneCollab.Editor.SceneSync
 
         public static bool IsTracked(string path)
         {
+            if (SceneComponentFields.IsComponentPath(path))
+            {
+                return true;
+            }
+
             for (var i = 0; i < TrackedPaths.Length; i++)
             {
                 if (string.Equals(TrackedPaths[i], path, StringComparison.Ordinal))
@@ -46,6 +51,11 @@ namespace SceneCollab.Editor.SceneSync
             if (gameObject == null || !IsTracked(path))
             {
                 return false;
+            }
+
+            if (SceneComponentFields.IsComponentPath(path))
+            {
+                return TryReadComponent(gameObject, path, out value);
             }
 
             UnityEngine.Object target = IsOnGameObject(path) ? (UnityEngine.Object)gameObject : gameObject.transform;
@@ -66,6 +76,11 @@ namespace SceneCollab.Editor.SceneSync
                 return false;
             }
 
+            if (SceneComponentFields.IsComponentPath(path))
+            {
+                return TryWriteComponent(gameObject, path, value);
+            }
+
             UnityEngine.Object target = IsOnGameObject(path) ? (UnityEngine.Object)gameObject : gameObject.transform;
             var serialized = new SerializedObject(target);
             var property = serialized.FindProperty(path);
@@ -81,6 +96,62 @@ namespace SceneCollab.Editor.SceneSync
 
             // WithoutUndo: a remote edit is not this user's undo step. Recording it would make Ctrl+Z
             // undo a colleague's change locally while the server still believes it happened.
+            serialized.ApplyModifiedPropertiesWithoutUndo();
+            return true;
+        }
+
+        static bool TryReadComponent(GameObject gameObject, string path, out string value)
+        {
+            value = null;
+
+            string typeName, serializedPath;
+            if (!SceneComponentFields.TryParse(path, out typeName, out serializedPath))
+            {
+                return false;
+            }
+
+            var component = SceneComponentFields.FindComponent(gameObject, typeName);
+            if (component == null)
+            {
+                return false;
+            }
+
+            var serialized = new SerializedObject(component);
+            var property = serialized.FindProperty(serializedPath);
+            if (property == null)
+            {
+                return false;
+            }
+
+            return SceneValueCodec.TryRead(property, out value);
+        }
+
+        static bool TryWriteComponent(GameObject gameObject, string path, string value)
+        {
+            string typeName, serializedPath;
+            if (!SceneComponentFields.TryParse(path, out typeName, out serializedPath))
+            {
+                return false;
+            }
+
+            var component = SceneComponentFields.FindComponent(gameObject, typeName);
+            if (component == null)
+            {
+                return false;
+            }
+
+            var serialized = new SerializedObject(component);
+            var property = serialized.FindProperty(serializedPath);
+            if (property == null)
+            {
+                return false;
+            }
+
+            if (!SceneValueCodec.TryWrite(property, value))
+            {
+                return false;
+            }
+
             serialized.ApplyModifiedPropertiesWithoutUndo();
             return true;
         }

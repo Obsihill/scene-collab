@@ -36,6 +36,7 @@ namespace SceneCollab.Editor
             public InboundKind Kind;
             public string Text;
             public string Detail;
+            public WireMessage Message;
         }
 
         const int ReceiveBufferBytes = 16 * 1024;
@@ -47,12 +48,31 @@ namespace SceneCollab.Editor
         ClientWebSocket _socket;
         CancellationTokenSource _cancellation;
         bool _pumpAttached;
+        string _displayName;
 
         public CollabConnectionState State { get; private set; }
 
         public string ClientId { get; private set; }
 
         public bool IsScribe { get; private set; }
+
+        /// <summary>True when this editor opened the scene and is therefore the one that saves.</summary>
+        public bool IsHost { get; private set; }
+
+        public string SceneGuid { get; private set; }
+
+        public string ScenePath { get; private set; }
+
+        public string SceneName { get; private set; }
+
+        /// <summary>Node ids currently locked by someone in the room, as last announced by the server.</summary>
+        public string[] LockedNodeIds { get; private set; }
+
+        /// <summary>Number of assets the host's scene depends on (0 until the host publishes).</summary>
+        public int AssetCount { get; private set; }
+
+        /// <summary>Asset guids the host's scene depends on, as last published ("" until then).</summary>
+        public string[] AssetGuids { get; private set; }
 
         public long Revision { get; private set; }
 
@@ -68,12 +88,20 @@ namespace SceneCollab.Editor
         public event Action<WireMessage> OperationReceived;
         public event Action<WireMessage> OperationAcknowledged;
         public event Action<string, string> ErrorReceived;
+        public event Action LocksChanged;
+        public event Action<int> AssetCountChanged;
+        public event Action AssetManifestChanged;
 
         public CollabSession()
         {
             State = CollabConnectionState.Disconnected;
             ClientId = "";
             RoomName = "";
+            SceneGuid = "";
+            ScenePath = "";
+            SceneName = "";
+            LockedNodeIds = new string[0];
+            AssetGuids = new string[0];
         }
 
         public void Connect(CollabSettings settings)
@@ -100,7 +128,13 @@ namespace SceneCollab.Editor
             // called from the main thread" and the socket never opens.
             var accessToken = CollabSettings.Token;
             var connectionUrl = settings.BuildConnectionUrl();
-            Task.Run(() => RunAsync(accessToken, connectionUrl, token));
+            var identity = SceneSync.SceneIdentity.CaptureActive();
+            var displayName = string.IsNullOrEmpty(settings.displayName)
+                ? Environment.UserName
+                : settings.displayName.Trim();
+            _displayName = displayName;
+
+            Task.Run(() => RunAsync(accessToken, connectionUrl, displayName, identity, token));
         }
 
         public void Disconnect()
@@ -136,9 +170,16 @@ namespace SceneCollab.Editor
             DetachPump();
             _participants.Clear();
             IsScribe = false;
+            IsHost = false;
             ClientId = "";
+            SceneGuid = "";
+            ScenePath = "";
+            SceneName = "";
+            LockedNodeIds = new string[0];
+            AssetGuids = new string[0];
             SetState(CollabConnectionState.Disconnected);
             RaiseParticipantsChanged();
+            RaiseLocksChanged();
         }
 
         public bool SendOperation(SceneOperation operation)
@@ -154,6 +195,68 @@ namespace SceneCollab.Editor
             return true;
         }
 
+        /// <summary>
+        /// Ask the server for (or release) the edit lock on a node. The server answers everyone with the
+        /// full lock set, so the local view is only ever replaced, never patched.
+        /// </summary>
+        public bool SendLock(string nodeId, bool release)
+        {
+            if (State != CollabConnectionState.Connected || string.IsNullOrEmpty(nodeId))
+            {
+                return false;
+            }
+
+            Send(new WireMessage
+            {
+                type = release ? MessageTypes.Unlock : MessageTypes.Lock,
+                clientId = ClientId,
+                room = RoomName,
+                lockNodeId = nodeId,
+                displayName = _displayName,
+            });
+
+            return true;
+        }
+
+        /// <summary>
+        /// Publish the asset guids the host's scene depends on (host only). Every joiner resolves the
+        /// list against its own AssetDatabase and stands placeholders in for whatever it lacks.
+        /// </summary>
+        public bool PublishAssets(string[] assetGuids)
+        {
+            if (State != CollabConnectionState.Connected || !IsHost)
+            {
+                return false;
+            }
+
+            Send(new WireMessage
+            {
+                type = MessageTypes.Assets,
+                clientId = ClientId,
+                room = RoomName,
+                assetGuids = assetGuids ?? new string[0],
+                assetCount = assetGuids == null ? 0 : assetGuids.Length,
+            });
+
+            return true;
+        }
+
+        /// <summary>Count-only overload kept for callers that have not moved to a manifest yet.</summary>
+        public bool PublishAssetCount(int count)
+        {
+            return PublishAssets(new string[Math.Max(0, count)]);
+        }
+
+        public bool IsLockedByOther(string nodeId)
+        {
+            if (string.IsNullOrEmpty(nodeId) || LockedNodeIds == null)
+            {
+                return false;
+            }
+
+            return Array.IndexOf(LockedNodeIds, nodeId) >= 0;
+        }
+
         public void Dispose()
         {
             Disconnect();
@@ -162,7 +265,12 @@ namespace SceneCollab.Editor
 
         // ── socket side (thread pool) ───────────────────────────────────────────
 
-        async Task RunAsync(string accessToken, string connectionUrl, CancellationToken token)
+        async Task RunAsync(
+            string accessToken,
+            string connectionUrl,
+            string displayName,
+            SceneSync.SceneIdentity identity,
+            CancellationToken token)
         {
             var socket = new ClientWebSocket();
 
@@ -176,7 +284,20 @@ namespace SceneCollab.Editor
                 await socket.ConnectAsync(new Uri(connectionUrl), token).ConfigureAwait(false);
 
                 _socket = socket;
-                _inbox.Enqueue(new Inbound { Kind = InboundKind.SocketOpened });
+                _inbox.Enqueue(new Inbound
+                {
+                    Kind = InboundKind.SocketOpened,
+                    Message = new WireMessage
+                    {
+                        type = MessageTypes.Hello,
+                        protocolVersion = ProtocolVersion.Current,
+                        displayName = displayName,
+                        room = RoomName,
+                        sceneGuid = identity.guid,
+                        scenePath = identity.path,
+                        sceneName = identity.name,
+                    },
+                });
                 await ReceiveLoopAsync(socket, token).ConfigureAwait(false);
             }
             catch (OperationCanceledException)
@@ -306,7 +427,7 @@ namespace SceneCollab.Editor
                 switch (item.Kind)
                 {
                     case InboundKind.SocketOpened:
-                        SendHello();
+                        Send(item.Message);
                         break;
 
                     case InboundKind.Text:
@@ -329,17 +450,6 @@ namespace SceneCollab.Editor
                         break;
                 }
             }
-        }
-
-        void SendHello()
-        {
-            Send(new WireMessage
-            {
-                type = MessageTypes.Hello,
-                protocolVersion = ProtocolVersion.Current,
-                displayName = Environment.UserName,
-                room = RoomName,
-            });
         }
 
         void HandleMessage(string json)
@@ -365,7 +475,14 @@ namespace SceneCollab.Editor
                 case MessageTypes.Welcome:
                     ClientId = message.clientId;
                     IsScribe = message.isScribe;
+                    IsHost = message.isHost;
                     Revision = message.revision;
+                    SceneGuid = message.sceneGuid ?? "";
+                    ScenePath = message.scenePath ?? "";
+                    SceneName = message.sceneName ?? "";
+                    LockedNodeIds = message.lockedNodeIds ?? new string[0];
+                    AssetCount = message.assetCount;
+                    AssetGuids = message.assetGuids ?? new string[0];
                     if (!string.IsNullOrEmpty(message.room))
                     {
                         RoomName = message.room;
@@ -373,6 +490,30 @@ namespace SceneCollab.Editor
 
                     ReplaceParticipants(message.participants);
                     SetState(CollabConnectionState.Connected);
+                    RaiseLocksChanged();
+                    RaiseAssetManifestChanged();
+                    break;
+
+                case MessageTypes.Lock:
+                case MessageTypes.Unlock:
+                    LockedNodeIds = message.lockedNodeIds ?? new string[0];
+                    RaiseLocksChanged();
+                    break;
+
+                case MessageTypes.Assets:
+                    if (message.assetGuids != null && message.assetGuids.Length > 0)
+                    {
+                        AssetGuids = message.assetGuids;
+                    }
+
+                    AssetCount = message.assetCount > 0 ? message.assetCount : AssetGuids.Length;
+                    var assetHandler = AssetCountChanged;
+                    if (assetHandler != null)
+                    {
+                        assetHandler(AssetCount);
+                    }
+
+                    RaiseAssetManifestChanged();
                     break;
 
                 case MessageTypes.Presence:
@@ -454,6 +595,24 @@ namespace SceneCollab.Editor
         void RaiseParticipantsChanged()
         {
             var handler = ParticipantsChanged;
+            if (handler != null)
+            {
+                handler();
+            }
+        }
+
+        void RaiseAssetManifestChanged()
+        {
+            var handler = AssetManifestChanged;
+            if (handler != null)
+            {
+                handler();
+            }
+        }
+
+        void RaiseLocksChanged()
+        {
+            var handler = LocksChanged;
             if (handler != null)
             {
                 handler();
