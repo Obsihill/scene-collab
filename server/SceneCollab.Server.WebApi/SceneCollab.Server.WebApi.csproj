@@ -5,7 +5,7 @@
     <AssemblyName>SceneCollab.Server.WebApi</AssemblyName>
     <RootNamespace>SceneCollab.Server.WebApi</RootNamespace>
     <InvariantGlobalization>true</InvariantGlobalization>
-    <Version>0.4.3</Version>
+    <Version>0.4.4</Version>
   </PropertyGroup>
 
   <ItemGroup>

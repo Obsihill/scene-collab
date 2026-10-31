@@ -7,6 +7,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.4] — 2026-11-01
+
+### Fixed
+
+- **Abandoned rooms are dropped.** A room was created on the first join and never removed, so every
+  room name anyone ever typed stayed in the process for the lifetime of the container: `/health`
+  reported rooms that `/rooms` did not list, and the count only reset when the container was
+  restarted. The last participant to leave now hands the room back to the hub, which removes it —
+  only if the registered instance is still the one that went empty, so a re-created room with the
+  same key is never evicted by a late teardown.
+
 ## [0.4.3] — 2026-11-01
 
 ### Added
