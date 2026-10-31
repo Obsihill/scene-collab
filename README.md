@@ -52,7 +52,7 @@ Verified end to end, not by unit tests alone:
 `Packages/manifest.json`:
 
 ```jsonc
-"com.obsihill.scenecollab": "https://github.com/Obsihill/scene-collab.git?path=unity/com.obsihill.scenecollab#v0.4.5"
+"com.obsihill.scenecollab": "https://github.com/Obsihill/scene-collab.git?path=unity/com.obsihill.scenecollab#v0.4.6"
 ```
 
 Then `Tools > Scene Collab`. Requires Unity **6000.0 or newer**.
@@ -194,9 +194,10 @@ in `Packages/manifest.json`:
 3. **v0.3** — scene-level sessions: `/rooms` scene list, scene-GUID handshake, host = scribe, host
    promotion, structural ops under object lock, component adds, asset manifest and placeholders.
 4. **v0.4** — component removal, missing-script stand-ins, prefab field overrides. ✅
-5. **v0.4.5** — 20 s heartbeats both ways, dead peers hung up on after 60 s, automatic reconnect. ✅
-6. **v0.4.4** — abandoned rooms are dropped when the last participant leaves. ✅
-7. **v0.4.3** — late-joiner snapshot, prefab override promotion, peer scene-view cameras.
+5. **v0.4.6** — a guest that reconnects re-requests its snapshot. ✅
+6. **v0.4.5** — 20 s heartbeats both ways, dead peers hung up on after 60 s, automatic reconnect. ✅
+7. **v0.4.4** — abandoned rooms are dropped when the last participant leaves. ✅
+8. **v0.4.3** — late-joiner snapshot, prefab override promotion, peer scene-view cameras.
 6. **v0.5** — `samples~` demo scene, prefab-instance structural edits (`addedObjects`), `TerrainData`
    delta channel (stroke-sized region deltas, terrain lock).
 7. **v1.0** — first-run wizard (Lv1 host mode: server spawned locally, 6-digit code).

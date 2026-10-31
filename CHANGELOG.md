@@ -7,6 +7,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.6] — 2026-11-01
+
+### Fixed
+
+- **A guest that reconnects asks for a snapshot again.** The "asked once" flag survived the
+  disconnect, so an editor that came back was a new join as far as the server was concerned — it had
+  no baseline any more — but the re-request was skipped and it carried on editing a scene nobody else
+  could see. Hosts were unaffected: they have no baseline to ask for.
+
 ## [0.4.5] — 2026-11-01
 
 ### Added

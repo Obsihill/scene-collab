@@ -664,6 +664,14 @@ namespace SceneCollab.Editor.SceneSync
         {
             UpdateSaveGuard();
 
+            if (_session != null && _session.State != CollabConnectionState.Connected)
+            {
+                // One request per connection. A guest that comes back after a drop is a new join as far
+                // as the server is concerned — it has no baseline any more, so the flag has to clear or
+                // the re-request is silently skipped and the editor carries on against a stale scene.
+                _snapshotRequested = false;
+            }
+
             if (_session != null && _session.State == CollabConnectionState.Connected && Enabled && !_primed)
             {
                 PrimeActiveScene();
