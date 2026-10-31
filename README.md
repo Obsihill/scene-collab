@@ -38,7 +38,7 @@ non-zero unless both directions actually landed.
 `Packages/manifest.json`:
 
 ```jsonc
-"com.obsihill.scenecollab": "https://github.com/Obsihill/scene-collab.git?path=unity/com.obsihill.scenecollab#v0.2.0"
+"com.obsihill.scenecollab": "https://github.com/Obsihill/scene-collab.git?path=unity/com.obsihill.scenecollab#v0.2.1"
 ```
 
 Then `Tools > Scene Collab`. Requires Unity **6000.0 or newer**.

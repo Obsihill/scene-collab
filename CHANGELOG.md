@@ -7,6 +7,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.1] — 2026-10-31
+
+Release plumbing only; no behaviour change in the editor.
+
+### Fixed
+
+- The tagged image never pushed: Docker rejects an uppercase repository name, and the workflow built
+  `ghcr.io/Obsihill/...` from `github.repository_owner`. The image path is now the lowercase literal.
+- Relayed ops now carry the author's `displayName`, so a receiver can label an edit without matching
+  `clientId` against a roster it may have joined after.
+- Arm64 image leg runs under QEMU; without it buildx fails on the second platform.
+
 ## [0.2.0] — 2026-10-31
 
 Scene edits now travel. A cube moved in one editor appears moved in the other, in both directions.

@@ -1,6 +1,6 @@
 {
   "name": "com.obsihill.scenecollab",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "displayName": "Scene Collab",
   "description": "Edit the same Unity scene with several people at the same time, while Git stays the source of truth. Run the server yourself (one docker compose file) and connect the editor in two clicks.",
   "unity": "6000.0",

@@ -54,7 +54,7 @@ Nginx Proxy Manager 예시:
 `Packages/manifest.json`에 한 줄 추가:
 
 ```jsonc
-"com.obsihill.scenecollab": "https://github.com/Obsihill/scene-collab.git?path=unity/com.obsihill.scenecollab#v0.2.0"
+"com.obsihill.scenecollab": "https://github.com/Obsihill/scene-collab.git?path=unity/com.obsihill.scenecollab#v0.2.1"
 ```
 
 Unity가 패키지를 받아오면 메뉴에 **Tools > Scene Collab** 이 생깁니다.
@@ -75,21 +75,28 @@ Unity가 패키지를 받아오면 메뉴에 **Tools > Scene Collab** 이 생깁
 
 ## 3. 지금 되는 것 / 아직 안 되는 것
 
-정직하게 적습니다. 현재 릴리스는 **연결 계층**까지입니다.
+정직하게 적습니다. v0.2에서 **씬 편집이 실제로 전파**됩니다.
 
 | 기능 | 상태 |
 |---|---|
 | 서버 기동·`/health`·토큰 인증 | ✅ 동작 |
 | 룸(room) 분리, 참여자 목록(presence) | ✅ 동작 |
-| op 전송·권위 적용·브로드캐스트·중복 재전송 차단 | ✅ 동작 (`tools/SceneCollab.Smoke`로 실측) |
-| Unity 패키지 설치·창·연결 | ✅ 동작 |
-| 씬 오브젝트 변경 캡처(`ObjectChangeEvents`) | 🚧 다음 단계 |
-| 캡처한 op를 남의 씬에 적용(`SerializedProperty`) | 🚧 다음 단계 |
-| scribe 저장 가로채기, `*.unity.ids.json` 사이드카 | 🚧 다음 단계 |
+| op 전송·권위 적용·브로드캐스트·중복 재전송 차단 | ✅ 동작 (서버 단위 테스트 16개 + 스모크) |
+| Unity 패키지 설치·창·연결 | ✅ 동작 (EditMode 테스트 36개) |
+| 씬 오브젝트 변경 캡처(`ObjectChangeEvents`) → `set_property` | ✅ 위치·회전·스케일·이름 |
+| 남의 op를 내 씬에 적용(`SerializedProperty`) + 자기 메아리 차단 | ✅ 동작 |
+| scribe 외 편집자의 `SaveScene` 차단, `*.unity.ids.json` 사이드카 | ✅ 동작 |
+| 구조 변경(추가/삭제/부모 변경/순서 변경) op | 🚧 다음 단계 |
+| 프리팹 인스턴스 오버라이드(`m_Modifications`) | 🚧 다음 단계 |
+| 컴포넌트 필드(프로퍼티 경로 사다리) | 🚧 다음 단계 |
 
-즉 **"붙는 것"은 지금 되고, "씬이 서로 따라 움직이는 것"은 다음 커밋**입니다.
-순서를 이렇게 잡은 이유는, 캡처·적용은 서버가 op를 정확히 한 번 적용한다는 보장 위에서만
-의미가 있기 때문입니다. 그 보장을 먼저 테스트로 고정했습니다.
+전파는 실측으로 확인했습니다(`bash tools/live-run.sh`): 서버 + 헤드리스 Unity 에디터 + Unity가
+아닌 참여자를 띄우고, 상대가 큐브를 `(3,4,5)`로 옮기면 에디터에 반영되고, 에디터가 `(7,8,9)`로
+옮기면 상대에게 그 op가 그대로 도착합니다. 두 방향 중 하나라도 실패하면 스크립트가 0이 아닌
+종료 코드를 냅니다.
+
+구조 변경을 뒤로 미룬 이유는, 추가/삭제/부모 변경은 **오브젝트 락**이 필요한데 락은 편집 흐름을
+바꾸는 결정이라 스칼라 값 전파가 확실해진 다음에 얹는 편이 안전하기 때문입니다.
 
 ---
 

@@ -217,6 +217,9 @@ namespace SceneCollab.Server.WebApi.WebSockets
                 type = MessageTypes.Op,
                 opId = record.OpId,
                 clientId = record.ClientId,
+                // Carried here so a receiver can label the edit ("Obsihill moved Cube") without
+                // having to match clientId against a roster it may have missed.
+                displayName = connection.DisplayName,
                 opKind = record.Kind,
                 nodeId = record.NodeId,
                 propertyPath = record.PropertyPath,
