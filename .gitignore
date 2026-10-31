@@ -1,0 +1,38 @@
+# ---- .NET ----
+bin/
+obj/
+*.user
+*.suo
+.vs/
+
+# ---- local build/verification output ----
+artifacts/
+
+# ---- runtime state (never commit) ----
+data/
+*.sqlite
+*.db
+.env
+*.tgz
+
+# ---- Unity (for the UPM package folder) ----
+[Ll]ibrary/
+[Tt]emp/
+[Oo]bj/
+[Bb]uild/
+[Bb]uilds/
+[Ll]ogs/
+[Uu]ser[Ss]ettings/
+*.csproj.user
+*.unityproj
+*.pidb
+*.booproj
+*.svd
+sysinfo.txt
+
+# ---- OS / editor ----
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp

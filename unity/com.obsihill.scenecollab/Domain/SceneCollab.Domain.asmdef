@@ -1,0 +1,16 @@
+{
+    "name": "SceneCollab.Domain",
+    "rootNamespace": "SceneCollab.Domain",
+    "references": [
+        "SceneCollab.Contracts"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": false,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": true
+}

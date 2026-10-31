@@ -1,0 +1,20 @@
+services:
+  scene-collab:
+    image: ghcr.io/obsihill/scene-collab:latest
+    # For local development from source, comment `image` and uncomment:
+    # build:
+    #   context: .
+    #   dockerfile: server/SceneCollab.Server.WebApi/Dockerfile
+    container_name: scene-collab
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      SCENECOLLAB_BIND: 0.0.0.0
+    ports:
+      - "${SCENECOLLAB_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD", "dotnet", "--info"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

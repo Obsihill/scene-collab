@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- netstandard2.1 on purpose: the domain is pure logic with zero framework
+       dependencies, so it is testable in milliseconds and portable if we ever host
+       the server on a different runtime. -->
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <AssemblyName>SceneCollab.Domain</AssemblyName>
+    <RootNamespace>SceneCollab.Domain</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\contracts\SceneCollab.Contracts\SceneCollab.Contracts.csproj" />
+  </ItemGroup>
+
+</Project>

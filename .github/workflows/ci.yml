@@ -1,0 +1,67 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  server:
+    name: build + test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Restore
+        run: dotnet restore SceneCollab.slnx
+
+      - name: Build
+        run: dotnet build SceneCollab.slnx -c Release --no-restore
+
+      - name: Test
+        run: dotnet test SceneCollab.slnx -c Release --no-build --logger "trx;LogFileName=results.trx"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results
+          path: '**/TestResults/*.trx'
+          if-no-files-found: ignore
+
+  guard:
+    name: repo guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The wire protocol must exist exactly once, in the Unity package. A copy under
+      # contracts/ or server/ means two schemas that will drift apart silently.
+      - name: Protocol has a single copy
+        run: |
+          found=$(find contracts server -name 'WireMessage.cs' -o -name 'MessageTypes.cs' -o -name 'ProtocolVersion.cs' | wc -l)
+          if [ "$found" -ne 0 ]; then
+            echo "::error::protocol sources found outside unity/com.obsihill.scenecollab/Contracts"
+            find contracts server -name '*.cs' -path '*Protocol*'
+            exit 1
+          fi
+
+      # Absolute file: paths in a manifest break batch-mode builds on other machines.
+      - name: "No absolute file: paths"
+        run: |
+          if grep -rn '"file:' --include='*.json' --include='*.jsonc' . | grep -v '/artifacts/'; then
+            echo "::error::absolute file: package reference found"
+            exit 1
+          fi
+
+      # UnityYAMLMerge is a Unity redistribution; bundling it in a public repo is not allowed.
+      - name: No bundled Unity tooling
+        run: |
+          if find . -iname 'UnityYAMLMerge*' | grep -q .; then
+            echo "::error::UnityYAMLMerge must not be bundled"
+            exit 1
+          fi

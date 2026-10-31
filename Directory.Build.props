@@ -1,0 +1,15 @@
+<Project>
+
+  <!-- LangVersion is pinned to 9.0 on purpose: the shared contract sources are compiled
+       by Unity 6000.x (C# 9). If the server could use C# 12 features, the same file would
+       fail to compile inside the editor. -->
+  <PropertyGroup>
+    <LangVersion>9.0</LangVersion>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Deterministic>true</Deterministic>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+  </PropertyGroup>
+
+</Project>

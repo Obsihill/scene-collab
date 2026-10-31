@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The wire protocol has exactly ONE copy of its source: the Unity package.
+       Unity cannot compile files that live outside a package folder, so the package owns
+       the physical files and this project links them. Never copy them here.
+
+       Include is absolute on purpose: relative globs starting with .. silently matched
+       nothing here, which produced an EMPTY assembly and a confusing "type not found"
+       error in every consumer. The target below makes that failure impossible. -->
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <AssemblyName>SceneCollab.Contracts</AssemblyName>
+    <RootNamespace>SceneCollab.Contracts</RootNamespace>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <ContractsSourceDir>$(MSBuildThisFileDirectory)..\..\unity\com.obsihill.scenecollab\Contracts\</ContractsSourceDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="$(ContractsSourceDir)**\*.cs" LinkBase="Linked" />
+  </ItemGroup>
+
+  <Target Name="VerifyContractsSource" BeforeTargets="CoreCompile">
+    <Error Condition="'@(Compile)' == ''"
+           Text="No protocol sources found under $(ContractsSourceDir). The Unity package must own the contract files." />
+  </Target>
+
+</Project>
