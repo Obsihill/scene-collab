@@ -67,6 +67,7 @@ fi
 
 dotnet tools/SceneCollab.Remote/bin/Debug/net10.0/SceneCollab.Remote.dll \
   --url "$URL" --token "$TOKEN" --room "$ROOM" --dir "$DIR" --expect 7,8,9 \
+  --soak --expect-soak 1,2,3 \
   > artifacts/live-peer.log 2>&1 &
 PEER_PID=$!
 

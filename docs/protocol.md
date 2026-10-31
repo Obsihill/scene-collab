@@ -21,7 +21,10 @@ GET /rooms                   header: X-SceneCollab-Token  → JSON, scenes curre
 
 - Text frames, UTF-8, one JSON object per frame.
 - Max inbound message: 4 MiB.
-- Server pings with WebSocket keep-alive every 20 s.
+- Server and client both send an application-level `ping` every 20 s and answer it with `pong`.
+  A peer that has been silent for 60 s is hung up on. This is not the same as a WebSocket keep-alive
+  frame: a proxy will happily keep an upstream socket open for hours after the editor behind it has
+  gone to sleep, and only a message the client has to *answer* proves it is still there.
 - Room names: `^[A-Za-z0-9._-]{1,64}$`.
 
 ## Handshake

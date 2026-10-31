@@ -21,11 +21,13 @@ var outPath = options.GetValueOrDefault("--out", "artifacts/v043/report.json");
 var sceneGuid = "33333333333333333333333333333333";
 var failures = 0;
 var results = new List<object>();
+var clock = System.Diagnostics.Stopwatch.StartNew();
 
 void Check(string name, bool passed, string detail = "")
 {
     results.Add(new { name, passed, detail });
-    Console.WriteLine((passed ? "PASS  " : "FAIL  ") + name + (detail.Length == 0 ? "" : "  — " + detail));
+    Console.WriteLine("t+" + clock.Elapsed.TotalSeconds.ToString("0.0") + "s "
+        + (passed ? "PASS  " : "FAIL  ") + name + (detail.Length == 0 ? "" : "  — " + detail));
     if (!passed)
     {
         failures++;
@@ -272,6 +274,32 @@ Check("a camera pose does not move the revision", guest.LastSeenRevision == revi
 var echo = await host.NextAsync(m => m.type == MessageTypes.View, 1500);
 Check("the host does not receive its own camera", echo == null);
 
+if (args.Contains("--heartbeat"))
+{
+    Console.WriteLine("-- heartbeat (about two minutes) --");
+
+    // Every peer is idle now, which is exactly when the server should be probing.
+    var answered = await host.AnswerPingsAsync(45000);
+    Check("the server pings an idle peer", answered >= 1, "answered=" + answered);
+    Check("answering a ping keeps the connection open", host.State == WebSocketState.Open, "state=" + host.State);
+
+    // A peer that is connected but never answers is the case TCP cannot see: a sleeping laptop, or a
+    // proxy holding the socket open. The server has to drop it, or the room stays occupied forever.
+    var mute = await Peer.ConnectAsync(
+        url, room, token, "v043-mute", sceneGuid, "Snapshot", "Assets/Snapshot.unity", 240);
+    Check("the silent peer joined", mute.Welcome is { isHost: false }, "isHost=" + mute.Welcome?.isHost);
+
+    var keepAlive = host.AnswerPingsAsync(180000);
+    var muteDropped = await mute.WaitForCloseAsync(150000);
+    Check("a peer that stops answering is hung up on", muteDropped);
+
+    var answeredWhileWaiting = await keepAlive;
+    Check("the peer that answers is still connected", host.State == WebSocketState.Open && answeredWhileWaiting >= 1,
+        "answered=" + answeredWhileWaiting + " state=" + host.State);
+
+    await mute.DisposeAsync();
+}
+
 Directory.CreateDirectory(Path.GetDirectoryName(outPath)!);
 await File.WriteAllTextAsync(outPath, JsonSerializer.Serialize(new
 {
@@ -315,7 +343,24 @@ sealed class Peer : IAsyncDisposable
     static readonly JsonSerializerOptions Options = WireJson.Options;
 
     readonly ClientWebSocket _socket = new();
-    readonly CancellationTokenSource _timeout = new(TimeSpan.FromSeconds(60));
+    readonly CancellationTokenSource _timeout;
+
+    /// <summary>
+    /// Frames are pulled by one background reader and parked here; waiting with a deadline then means
+    /// waiting on the queue, not cancelling a receive. Cancelling a receive aborts the socket outright,
+    /// which quietly killed every check that might legitimately see nothing arrive.
+    /// </summary>
+    readonly System.Threading.Channels.Channel<WireMessage> _inbox =
+        System.Threading.Channels.Channel.CreateUnbounded<WireMessage>();
+
+    Task _reader = Task.CompletedTask;
+
+    public Peer(TimeSpan lifetime)
+    {
+        _timeout = new CancellationTokenSource(lifetime);
+    }
+
+    public WebSocketState State => _socket.State;
     readonly List<WireMessage> _pending = new();
 
     public WireMessage? Welcome { get; private set; }
@@ -324,9 +369,10 @@ sealed class Peer : IAsyncDisposable
     public long Revision => LastSeenRevision;
 
     public static async Task<Peer> ConnectAsync(
-        string url, string room, string token, string name, string sceneGuid, string sceneName, string scenePath)
+        string url, string room, string token, string name, string sceneGuid, string sceneName, string scenePath,
+        int lifetimeSeconds = 360)
     {
-        var peer = new Peer();
+        var peer = new Peer(TimeSpan.FromSeconds(lifetimeSeconds));
         if (!string.IsNullOrEmpty(token))
         {
             peer._socket.Options.SetRequestHeader("X-SceneCollab-Token", token);
@@ -334,6 +380,7 @@ sealed class Peer : IAsyncDisposable
 
         var connectionUrl = url + (url.Contains('?') ? "&" : "?") + "room=" + Uri.EscapeDataString(room);
         await peer._socket.ConnectAsync(new Uri(connectionUrl), peer._timeout.Token);
+        peer._reader = peer.ReadLoopAsync();
 
         await peer.SendAsync(new WireMessage
         {
@@ -379,13 +426,28 @@ sealed class Peer : IAsyncDisposable
             }
         }
 
-        using var deadline = new CancellationTokenSource(timeoutMs);
+        var deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
         while (true)
         {
+            var left = (int)(deadline - DateTime.UtcNow).TotalMilliseconds;
+            if (left <= 0)
+            {
+                return null;
+            }
+
+            using var wait = new CancellationTokenSource(left);
             WireMessage? message;
             try
             {
-                message = await ReceiveAsync(deadline.Token);
+                if (!await _inbox.Reader.WaitToReadAsync(wait.Token))
+                {
+                    return null;
+                }
+
+                if (!_inbox.Reader.TryRead(out message))
+                {
+                    continue;
+                }
             }
             catch (OperationCanceledException)
             {
@@ -407,26 +469,86 @@ sealed class Peer : IAsyncDisposable
         }
     }
 
-    async Task<WireMessage?> ReceiveAsync(CancellationToken token)
+    /// <summary>Drains the socket into the inbox so a waiting caller never has to own the receive call.</summary>
+    async Task ReadLoopAsync()
     {
         var buffer = new byte[16 * 1024];
         using var stream = new MemoryStream();
-        while (true)
+        try
         {
-            var result = await _socket.ReceiveAsync(buffer, token);
-            if (result.MessageType == WebSocketMessageType.Close)
+            while (true)
             {
-                return null;
-            }
+                var result = await _socket.ReceiveAsync(buffer, CancellationToken.None);
+                if (result.MessageType == WebSocketMessageType.Close)
+                {
+                    break;
+                }
 
-            stream.Write(buffer, 0, result.Count);
-            if (result.EndOfMessage)
-            {
-                break;
+                stream.Write(buffer, 0, result.Count);
+                if (!result.EndOfMessage)
+                {
+                    continue;
+                }
+
+                var text = Encoding.UTF8.GetString(stream.ToArray());
+                stream.SetLength(0);
+                var message = JsonSerializer.Deserialize<WireMessage>(text, Options);
+                if (message != null)
+                {
+                    _inbox.Writer.TryWrite(message);
+                }
             }
         }
+        catch (Exception)
+        {
+            // A hang-up is reported through the socket state; there is nothing to log here.
+        }
+        finally
+        {
+            _inbox.Writer.TryComplete();
+        }
+    }
 
-        return JsonSerializer.Deserialize<WireMessage>(Encoding.UTF8.GetString(stream.ToArray()), Options);
+    /// <summary>
+    /// Answers server liveness probes for up to <paramref name="timeoutMs"/> and reports how many it
+    /// answered. Zero means the server never asked, which is the failure the heartbeat exists to avoid.
+    /// </summary>
+    public async Task<int> AnswerPingsAsync(int timeoutMs)
+    {
+        var answered = 0;
+        var deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
+
+        while (DateTime.UtcNow < deadline)
+        {
+            var remaining = (int)Math.Max(500, (deadline - DateTime.UtcNow).TotalMilliseconds);
+            var ping = await NextAsync(m => m.type == MessageTypes.Ping, Math.Min(remaining, 30000));
+            if (ping == null)
+            {
+                return answered;
+            }
+
+            await SendAsync(new WireMessage { type = MessageTypes.Pong });
+            answered++;
+        }
+
+        return answered;
+    }
+
+    /// <summary>True when the server hung up on this peer (close frame or an aborted TCP connection).</summary>
+    public async Task<bool> WaitForCloseAsync(int timeoutMs)
+    {
+        var deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
+        while (DateTime.UtcNow < deadline)
+        {
+            if (_socket.State != WebSocketState.Open)
+            {
+                return true;
+            }
+
+            await Task.Delay(250);
+        }
+
+        return _socket.State != WebSocketState.Open;
     }
 
     public async Task CloseAsync()
@@ -446,10 +568,18 @@ sealed class Peer : IAsyncDisposable
         await DisposeAsync();
     }
 
-    public ValueTask DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         _socket.Dispose();
+        try
+        {
+            await _reader.WaitAsync(TimeSpan.FromSeconds(5));
+        }
+        catch (Exception)
+        {
+            // The reader ends on its own when the socket goes away.
+        }
+
         _timeout.Dispose();
-        return ValueTask.CompletedTask;
     }
 }

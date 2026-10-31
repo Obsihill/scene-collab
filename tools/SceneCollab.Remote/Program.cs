@@ -20,6 +20,12 @@ var token = options.GetValueOrDefault("--token", "");
 var name = options.GetValueOrDefault("--name", "remote-peer");
 var expectedFromUnity = options.GetValueOrDefault("--expect", "7,8,9");
 
+// --soak makes this peer stay for the liveness window instead of leaving after the first exchange.
+// A peer that sits still for longer than the server's silence timeout is exactly the case that used
+// to drop the editor: if either side fails to answer a ping, this run says so.
+var soak = options.ContainsKey("--soak");
+var expectedSoak = options.GetValueOrDefault("--expect-soak", "1,2,3");
+
 Directory.CreateDirectory(dir);
 
 var logPath = Path.Combine(dir, "peer-log.jsonl");
@@ -35,7 +41,7 @@ void Log(string evt, params (string Key, object? Value)[] fields)
     Console.WriteLine("[" + evt + "] " + JsonSerializer.Serialize(payload));
 }
 
-using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(150));
+using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(soak ? 420 : 150));
 using var socket = new ClientWebSocket();
 if (!string.IsNullOrEmpty(token))
 {
@@ -118,6 +124,12 @@ while (DateTime.UtcNow < deadline)
         break;
     }
 
+    if (message.type == MessageTypes.Ping)
+    {
+        await AnswerPingAsync(message);
+        continue;
+    }
+
     if (message.type != MessageTypes.Op)
     {
         continue;
@@ -147,12 +159,39 @@ while (DateTime.UtcNow < deadline)
         File.WriteAllText(Path.Combine(dir, "peer-observed.json"),
             JsonSerializer.Serialize(new { newValue = message.newValue, from = message.displayName }));
         Log("observed_unity_edit", ("newValue", message.newValue));
+        if (!soak)
+        {
+            return 0;
+        }
+
+        // Stay put: the editor is about to hold the socket open across several probes, and the only
+        // way to know that worked from this side is to be here when its next edit arrives.
+        deadline = DateTime.UtcNow.AddSeconds(180);
+        continue;
+    }
+
+    if (soak && message.propertyPath == "m_LocalPosition" && message.newValue == expectedSoak)
+    {
+        File.WriteAllText(Path.Combine(dir, "peer-soak.json"),
+            JsonSerializer.Serialize(new { newValue = message.newValue, from = message.displayName }));
+        Log("observed_unity_edit_after_soak", ("newValue", message.newValue));
         return 0;
     }
 }
 
-Log("timeout_waiting_for_unity_edit");
+Log(soak ? "timeout_waiting_for_unity_edit_after_soak" : "timeout_waiting_for_unity_edit");
 return 1;
+
+// The server probes every 20 s and hangs up after a minute of silence, so a test peer has to answer
+// exactly like an editor does.
+async Task AnswerPingAsync(WireMessage message)
+{
+    if (message.type == MessageTypes.Ping)
+    {
+        await SendAsync(new WireMessage { type = MessageTypes.Pong });
+        Log("pong");
+    }
+}
 
 async Task SendAsync(WireMessage message)
 {
@@ -174,6 +213,12 @@ async Task<WireMessage> ReadUntilAsync(string type)
         {
             Log("server_error", ("code", message.code), ("message", message.message));
             throw new InvalidOperationException("server refused: " + message.code + " " + message.message);
+        }
+
+        if (message.type == MessageTypes.Ping)
+        {
+            await AnswerPingAsync(message);
+            continue;
         }
 
         if (message.type == type)

@@ -7,6 +7,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.5] — 2026-11-01
+
+### Added
+
+- **Connections that die quietly are noticed, and picked back up.** Both ends now send a protocol-level
+  `ping` every 20 s and answer it with `pong`; a peer that has been silent for 60 s is hung up on.
+  TCP is not enough here — behind a reverse proxy the upstream socket stays open for hours after the
+  editor behind it slept or lost Wi-Fi, so the server believed the room was still occupied, `/health`
+  counted a room nobody was in, and the editor believed it was still connected while every op it sent
+  went nowhere. The editor now also reconnects on its own: 1 s, 2 s, 4 s, 8 s, 15 s, then every 30 s,
+  with a successful connection resetting the ladder, and a guest that comes back asks the host for a
+  snapshot again so it is not left editing a stale scene.
+
 ## [0.4.4] — 2026-11-01
 
 ### Fixed

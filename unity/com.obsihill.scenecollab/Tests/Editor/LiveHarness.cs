@@ -40,6 +40,11 @@ namespace SceneCollab.Editor.Tests
         static double _stageDeadline;
         static int _stage;
         static bool _finished;
+        static double _soakStart;
+        static bool _reconnectMode;
+        static bool _sawDrop;
+        static bool _reconnectEditSent;
+        static int _sentBeforeReconnect;
 
         [MenuItem("Tools/Scene Collab/Run live harness (needs a server)")]
         public static void RunFromMenu()
@@ -74,6 +79,7 @@ namespace SceneCollab.Editor.Tests
                 return;
             }
 
+            _reconnectMode = Environment.GetEnvironmentVariable("SCENECOLLAB_LIVE_RECONNECT") == "1";
             _dir = Path.GetFullPath(_dir);
             Directory.CreateDirectory(_dir);
             ResetArtifacts();
@@ -214,7 +220,116 @@ namespace SceneCollab.Editor.Tests
                 WriteJson("unity-result.json", "{\"ok\":true,\"sent\":" + _sync.Sent + ",\"applied\":" + _sync.Applied
                     + ",\"ignored\":" + _sync.Ignored + ",\"rejected\":" + _sync.Rejected
                     + ",\"peerObserved\":" + observed.Trim() + "}");
-                Debug.Log("[live] PASS: both directions verified. sent=" + _sync.Sent + " applied=" + _sync.Applied);
+                Debug.Log("[live] both directions verified. sent=" + _sync.Sent + " applied=" + _sync.Applied);
+
+                // Hold the session open past the server's silence window with nobody typing. Before
+                // the heartbeat, an idle editor stayed "connected" long after the socket was dead;
+                // now an unanswered ping is a hang-up, so this stage fails loudly if the editor
+                // forgets to reply.
+                if (_reconnectMode)
+                {
+                    // The shell kills the server now and brings it back a few seconds later; the
+                    // editor is expected to notice on its own and come back without a click.
+                    _stage = 5;
+                    _stageDeadline = EditorApplication.timeSinceStartup + 240.0;
+                    return;
+                }
+
+                _soakStart = EditorApplication.timeSinceStartup;
+                _stage = 3;
+                _stageDeadline = _soakStart + 180.0;
+                return;
+            }
+
+            if (_stage == 5)
+            {
+                if (_session == null)
+                {
+                    return;
+                }
+
+                if (_session.State != CollabConnectionState.Connected)
+                {
+                    if (!_sawDrop)
+                    {
+                        _sawDrop = true;
+                        _sentBeforeReconnect = _sync.Sent;
+                        Debug.Log("[live] connection dropped (" + _session.State + "); waiting for the retry");
+                    }
+
+                    return;
+                }
+
+                if (!_sawDrop)
+                {
+                    return;
+                }
+
+                if (!_reconnectEditSent)
+                {
+                    Debug.Log("[live] reconnected on its own; editing again");
+                    Undo.RecordObject(_cube.transform, "live reconnect");
+                    _cube.transform.localPosition = new Vector3(4f, 5f, 6f);
+                    EditorSceneManager.MarkSceneDirty(_cube.scene);
+                    _reconnectEditSent = true;
+                    _stageDeadline = EditorApplication.timeSinceStartup + 60.0;
+                    return;
+                }
+
+                if (_sync.Sent <= _sentBeforeReconnect)
+                {
+                    return;
+                }
+
+                if (_sync.Rejected > 0)
+                {
+                    Fail("the edit after the reconnect was rejected (" + _sync.Rejected + ")");
+                    return;
+                }
+
+                WriteJson("unity-reconnect.json", "{\"ok\":true,\"dropped\":true,\"state\":\""
+                    + _session.State + "\",\"revision\":" + _session.Revision
+                    + ",\"sentBefore\":" + _sentBeforeReconnect + ",\"sentAfter\":" + _sync.Sent
+                    + ",\"clientId\":\"" + _session.ClientId + "\"}");
+                Debug.Log("[live] PASS: the editor dropped, came back, and its next edit went out");
+                Finish(0);
+                return;
+            }
+
+            if (_stage == 3)
+            {
+                var held = EditorApplication.timeSinceStartup - _soakStart;
+                if (held < 75.0)
+                {
+                    return;
+                }
+
+                if (_session == null || _session.State != CollabConnectionState.Connected)
+                {
+                    Fail("the session did not survive 75 s idle (state "
+                        + (_session == null ? "null" : _session.State.ToString()) + ")");
+                    return;
+                }
+
+                Debug.Log("[live] held the session for " + held.ToString("0") + " s idle; editing again");
+                Undo.RecordObject(_cube.transform, "live soak");
+                _cube.transform.localPosition = new Vector3(1f, 2f, 3f);
+                EditorSceneManager.MarkSceneDirty(_cube.scene);
+
+                _stage = 4;
+                _stageDeadline = EditorApplication.timeSinceStartup + 120.0;
+                return;
+            }
+
+            if (_stage == 4 && File.Exists(Path.Combine(_dir, "peer-soak.json")))
+            {
+                var held = EditorApplication.timeSinceStartup - _soakStart;
+                var observed = File.ReadAllText(Path.Combine(_dir, "peer-soak.json"));
+                WriteJson("unity-soak.json", "{\"ok\":true,\"idleSeconds\":" + held.ToString("0.0")
+                    + ",\"state\":\"" + _session.State + "\",\"revision\":" + _session.Revision
+                    + ",\"peerObserved\":" + observed.Trim() + "}");
+                Debug.Log("[live] PASS: the session outlived the silence window and still relays edits ("
+                    + held.ToString("0") + " s idle)");
                 Finish(0);
             }
         }

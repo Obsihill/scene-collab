@@ -93,6 +93,7 @@ namespace SceneCollab.Server.WebApi.WebSockets
         public async Task HandleAsync(WebSocket socket, ClientConnection connection, CancellationToken cancellationToken)
         {
             var joined = false;
+            var heartbeat = new CancellationTokenSource();
 
             try
             {
@@ -112,6 +113,8 @@ namespace SceneCollab.Server.WebApi.WebSockets
                     {
                         break;
                     }
+
+                    connection.LastSeenUtc = DateTime.UtcNow;
 
                     WireMessage message;
                     try
@@ -140,6 +143,12 @@ namespace SceneCollab.Server.WebApi.WebSockets
                         continue;
                     }
 
+                    if (message.type == MessageTypes.Pong)
+                    {
+                        // Liveness only. LastSeenUtc was already refreshed when the frame was read.
+                        continue;
+                    }
+
                     if (!joined)
                     {
                         if (message.type != MessageTypes.Hello)
@@ -150,6 +159,11 @@ namespace SceneCollab.Server.WebApi.WebSockets
                         }
 
                         joined = await HandleHelloAsync(connection, message, cancellationToken).ConfigureAwait(false);
+                        if (joined)
+                        {
+                            StartHeartbeat(socket, connection, heartbeat.Token);
+                        }
+
                         continue;
                     }
 
@@ -197,6 +211,8 @@ namespace SceneCollab.Server.WebApi.WebSockets
             }
             finally
             {
+                heartbeat.Cancel();
+                heartbeat.Dispose();
                 await RemoveAsync(connection).ConfigureAwait(false);
             }
         }
@@ -466,6 +482,48 @@ namespace SceneCollab.Server.WebApi.WebSockets
 
                 await client.SendAsync(json, cancellationToken).ConfigureAwait(false);
             }
+        }
+
+        static readonly TimeSpan HeartbeatInterval = TimeSpan.FromSeconds(20);
+        static readonly TimeSpan SilenceTimeout = TimeSpan.FromSeconds(60);
+
+        /// <summary>
+        /// A peer that stops answering is not gone as far as TCP is concerned: a proxy that keeps the
+        /// upstream socket open, or a laptop that went to sleep, leaves the receive call parked forever.
+        /// The room then stays "occupied" — <c>/rooms</c> hides it, <c>/health</c> counts it, and the
+        /// scene cannot be reopened cleanly. So the server asks every 20 s and hangs up after a minute
+        /// of silence; aborting the socket makes the receive loop fall out and drop the client.
+        /// </summary>
+        void StartHeartbeat(WebSocket socket, ClientConnection connection, CancellationToken token)
+        {
+            Task.Run(async () =>
+            {
+                try
+                {
+                    while (!token.IsCancellationRequested)
+                    {
+                        await Task.Delay(HeartbeatInterval, token).ConfigureAwait(false);
+
+                        if (DateTime.UtcNow - connection.LastSeenUtc > SilenceTimeout)
+                        {
+                            try { socket.Abort(); } catch (Exception) { }
+                            return;
+                        }
+
+                        await connection
+                            .SendAsync(WireJson.Serialize(new WireMessage { type = MessageTypes.Ping, serverTime = Now() }), token)
+                            .ConfigureAwait(false);
+                    }
+                }
+                catch (OperationCanceledException)
+                {
+                    // normal teardown
+                }
+                catch (Exception)
+                {
+                    // A heartbeat that throws must never take the room down with it.
+                }
+            }, CancellationToken.None);
         }
 
         async Task RemoveAsync(ClientConnection connection)

@@ -29,6 +29,8 @@ namespace SceneCollab.Editor
             Closed,
             Error,
             Fault,
+            Reconnecting,
+            Silent,
         }
 
         sealed class Inbound
@@ -41,6 +43,18 @@ namespace SceneCollab.Editor
 
         const int ReceiveBufferBytes = 16 * 1024;
 
+        /// <summary>Same cadence the server uses, so neither side mistakes the other for dead.</summary>
+        static readonly TimeSpan HeartbeatInterval = TimeSpan.FromSeconds(20);
+
+        /// <summary>
+        /// A minute of silence ends the connection. The server says the same about us: a socket can stay
+        /// "open" for hours behind a proxy after the machine at the other end has gone.
+        /// </summary>
+        static readonly TimeSpan SilenceTimeout = TimeSpan.FromSeconds(60);
+
+        /// <summary>Reconnect delays, in seconds. The last entry repeats.</summary>
+        static readonly int[] ReconnectDelaysSeconds = { 1, 2, 4, 8, 15, 30 };
+
         readonly ConcurrentQueue<Inbound> _inbox = new ConcurrentQueue<Inbound>();
         readonly SemaphoreSlim _sendGate = new SemaphoreSlim(1, 1);
         readonly List<ParticipantInfo> _participants = new List<ParticipantInfo>();
@@ -49,6 +63,12 @@ namespace SceneCollab.Editor
         CancellationTokenSource _cancellation;
         bool _pumpAttached;
         string _displayName;
+
+        // Ticks, not DateTime: written by the socket thread and read by the main thread, and a torn
+        // DateTime read is not something anybody wants to debug.
+        long _lastInboundTicks;
+        long _lastPingSentTicks;
+        volatile bool _keepAliveWanted;
 
         public CollabConnectionState State { get; private set; }
 
@@ -120,6 +140,8 @@ namespace SceneCollab.Editor
             }
 
             RoomName = string.IsNullOrEmpty(settings.room) ? "default" : settings.room;
+            _keepAliveWanted = true;
+            TouchInbound();
             SetState(CollabConnectionState.Connecting);
             AttachPump();
 
@@ -142,6 +164,10 @@ namespace SceneCollab.Editor
 
         public void Disconnect()
         {
+            // Cleared first: the run loop reads this to decide whether a dropped socket is worth
+            // reconnecting, and Disconnect() is the one case where it is not.
+            _keepAliveWanted = false;
+
             var cancellation = _cancellation;
             _cancellation = null;
             if (cancellation != null)
@@ -338,7 +364,51 @@ namespace SceneCollab.Editor
             SceneSync.SceneIdentity identity,
             CancellationToken token)
         {
+            var attempt = 0;
+
+            while (!token.IsCancellationRequested)
+            {
+                var wasConnected = await RunOnceAsync(accessToken, connectionUrl, displayName, identity, token)
+                    .ConfigureAwait(false);
+
+                if (token.IsCancellationRequested || !_keepAliveWanted)
+                {
+                    return;
+                }
+
+                // A connection that worked earns a fresh backoff: only a run of failures climbs the ladder.
+                attempt = wasConnected ? 1 : attempt + 1;
+                var delay = ReconnectDelaysSeconds[Math.Min(attempt - 1, ReconnectDelaysSeconds.Length - 1)];
+
+                UnityEngine.Debug.Log("[scene-collab] connection lost; retrying in " + delay + " s");
+
+                _inbox.Enqueue(new Inbound
+                {
+                    Kind = InboundKind.Reconnecting,
+                    Detail = delay.ToString(),
+                });
+
+                try
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(delay), token).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    return;
+                }
+            }
+        }
+
+        /// <summary>One connection attempt. Returns whether it ever got as far as opening the socket.</summary>
+        async Task<bool> RunOnceAsync(
+            string accessToken,
+            string connectionUrl,
+            string displayName,
+            SceneSync.SceneIdentity identity,
+            CancellationToken token)
+        {
             var socket = new ClientWebSocket();
+            var opened = false;
 
             try
             {
@@ -348,6 +418,8 @@ namespace SceneCollab.Editor
                 }
 
                 await socket.ConnectAsync(new Uri(connectionUrl), token).ConfigureAwait(false);
+                opened = true;
+                TouchInbound();
 
                 _socket = socket;
                 _inbox.Enqueue(new Inbound
@@ -372,12 +444,23 @@ namespace SceneCollab.Editor
             }
             catch (Exception ex)
             {
-                _inbox.Enqueue(new Inbound { Kind = InboundKind.Fault, Detail = ex.Message });
+                // Dropping the socket on purpose (silence, sleep/wake) is not a fault to show the user:
+                // the run loop is about to reconnect.
+                if (_keepAliveWanted)
+                {
+                    _inbox.Enqueue(new Inbound { Kind = InboundKind.Closed, Detail = ex.Message });
+                }
+                else
+                {
+                    _inbox.Enqueue(new Inbound { Kind = InboundKind.Fault, Detail = ex.Message });
+                }
             }
             finally
             {
                 try { socket.Dispose(); } catch (Exception) { }
             }
+
+            return opened;
         }
 
         async Task ReceiveLoopAsync(ClientWebSocket socket, CancellationToken token)
@@ -501,8 +584,31 @@ namespace SceneCollab.Editor
                         break;
 
                     case InboundKind.Closed:
+                        if (_keepAliveWanted)
+                        {
+                            // The run loop is already backing off; the pump stays attached so the
+                            // reconnect's welcome is handled without the user clicking anything.
+                            SetState(CollabConnectionState.Connecting);
+                            break;
+                        }
+
                         DetachPump();
                         SetState(CollabConnectionState.Disconnected);
+                        break;
+
+                    case InboundKind.Reconnecting:
+                        SetState(CollabConnectionState.Connecting);
+                        break;
+
+                    case InboundKind.Silent:
+                        // Aborting is what makes the parked receive call return; the run loop then
+                        // reconnects. Closing politely here would wait on a peer that never answers.
+                        var dead = _socket;
+                        if (dead != null)
+                        {
+                            try { dead.Abort(); } catch (Exception) { }
+                        }
+
                         break;
 
                     case InboundKind.Error:
@@ -516,10 +622,47 @@ namespace SceneCollab.Editor
                         break;
                 }
             }
+
+            TickKeepAlive();
+        }
+
+        /// <summary>Records that something arrived from the server, from either thread.</summary>
+        void TouchInbound()
+        {
+            Interlocked.Exchange(ref _lastInboundTicks, DateTime.UtcNow.Ticks);
+        }
+
+        /// <summary>
+        /// Main-thread heartbeat. Answers the question the socket API cannot: is the other end still
+        /// there? Silence past <see cref="SilenceTimeout"/> kills the socket so the run loop reconnects.
+        /// </summary>
+        void TickKeepAlive()
+        {
+            if (!_keepAliveWanted || State != CollabConnectionState.Connected || _socket == null)
+            {
+                return;
+            }
+
+            var now = DateTime.UtcNow;
+            var lastInbound = new DateTime(Interlocked.Read(ref _lastInboundTicks), DateTimeKind.Utc);
+            if (now - lastInbound > SilenceTimeout)
+            {
+                _inbox.Enqueue(new Inbound { Kind = InboundKind.Silent });
+                return;
+            }
+
+            var lastPing = new DateTime(Interlocked.Read(ref _lastPingSentTicks), DateTimeKind.Utc);
+            if (now - lastPing >= HeartbeatInterval)
+            {
+                Interlocked.Exchange(ref _lastPingSentTicks, now.Ticks);
+                Send(new WireMessage { type = MessageTypes.Ping });
+            }
         }
 
         void HandleMessage(string json)
         {
+            TouchInbound();
+
             WireMessage message;
             try
             {
@@ -589,6 +732,11 @@ namespace SceneCollab.Editor
                     }
 
                     ReplaceParticipants(message.participants);
+                    break;
+
+                case MessageTypes.Ping:
+                    // The server's liveness probe. Answering is what keeps this editor in the room.
+                    Send(new WireMessage { type = MessageTypes.Pong });
                     break;
 
                 case MessageTypes.View:

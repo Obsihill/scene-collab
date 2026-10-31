@@ -62,7 +62,7 @@ Nginx Proxy Manager 예시:
 `Packages/manifest.json`에 한 줄 추가:
 
 ```jsonc
-"com.obsihill.scenecollab": "https://github.com/Obsihill/scene-collab.git?path=unity/com.obsihill.scenecollab#v0.4.4"
+"com.obsihill.scenecollab": "https://github.com/Obsihill/scene-collab.git?path=unity/com.obsihill.scenecollab#v0.4.5"
 ```
 
 Unity가 패키지를 받아오면 메뉴에 **Tools > Scene Collab** 이 생깁니다.

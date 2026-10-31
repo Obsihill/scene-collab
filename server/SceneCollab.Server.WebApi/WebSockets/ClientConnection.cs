@@ -24,6 +24,7 @@ namespace SceneCollab.Server.WebApi.WebSockets
             RoomKey = roomKey;
             DisplayName = clientId;
             Color = "#888888";
+            LastSeenUtc = DateTime.UtcNow;
         }
 
         public string ClientId { get; }
@@ -33,6 +34,12 @@ namespace SceneCollab.Server.WebApi.WebSockets
         public string DisplayName { get; set; }
 
         public string Color { get; set; }
+
+        /// <summary>
+        /// When this peer was last heard from, by any frame at all. Written by the receive loop, read by
+        /// the heartbeat: a socket can look perfectly open after the editor behind it has gone away.
+        /// </summary>
+        public DateTime LastSeenUtc { get; set; }
 
         public bool IsOpen
         {
