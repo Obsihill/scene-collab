@@ -66,14 +66,23 @@ namespace SceneCollab.Editor.SceneSync
             }
         }
 
-        /// <summary>Hands over the objects touched since the last call and clears the set.</summary>
-        public void Drain(List<GameObject> into)
+        /// <summary>
+        /// Hands over the objects touched since the last call and clears the set.
+        /// </summary>
+        /// <returns>
+        /// Whether the hierarchy changed since the last drain. The flag is consumed here and handed
+        /// back instead of being left on the property: a caller that drained the dirty set and then
+        /// asked <see cref="StructureDirty"/> saw false every single tick, so structural edits
+        /// (create / delete / reparent / component add) were never turned into ops at all.
+        /// </returns>
+        public bool Drain(List<GameObject> into)
         {
+            var structureDirty = StructureDirty;
             StructureDirty = false;
 
             if (_dirty.Count == 0)
             {
-                return;
+                return structureDirty;
             }
 
             foreach (var gameObject in _dirty)
@@ -85,6 +94,7 @@ namespace SceneCollab.Editor.SceneSync
             }
 
             _dirty.Clear();
+            return structureDirty;
         }
 
         UndoPropertyModification[] OnPostprocessModifications(UndoPropertyModification[] modifications)
@@ -118,6 +128,12 @@ namespace SceneCollab.Editor.SceneSync
         }
 
         void OnHierarchyChanged()
+        {
+            NoteStructureChanged();
+        }
+
+        /// <summary>Test seam: pretends the hierarchy changed, so the drain contract can be asserted.</summary>
+        internal void NoteStructureChanged()
         {
             StructureDirty = true;
         }

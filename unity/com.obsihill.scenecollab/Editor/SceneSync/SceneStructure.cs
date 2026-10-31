@@ -170,6 +170,16 @@ namespace SceneCollab.Editor.SceneSync
             operation.ParentNodeId = parentNodeId;
             operation.SiblingIndex = gameObject.transform.GetSiblingIndex();
             operation.PrefabGuid = prefabGuid ?? "";
+
+            if (string.IsNullOrEmpty(prefabGuid))
+            {
+                // The add payload carries only name / active / transform. Every component has to
+                // follow as its own add_component op, so the signature starts empty here: baselining
+                // the real one told the next sweep there was nothing to send, and the peer got a bare
+                // object with a Transform — a cube that is never visible on the other screen.
+                _componentsByNode[nodeId] = string.Empty;
+            }
+
             created = true;
             return operation;
         }

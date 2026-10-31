@@ -276,7 +276,7 @@ namespace SceneCollab.Editor.SceneSync
             }
 
             _dirty.Clear();
-            _feed.Drain(_dirty);
+            var structureDirty = _feed.Drain(_dirty);
 
             for (var i = 0; i < _dirty.Count; i++)
             {
@@ -306,7 +306,7 @@ namespace SceneCollab.Editor.SceneSync
                 }
             }
 
-            if (_feed.StructureDirty)
+            if (structureDirty)
             {
                 CollectStructure();
             }

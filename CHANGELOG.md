@@ -7,6 +7,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.2] — 2026-11-01
+
+### Fixed
+
+- **Structural edits never left the editor.** `SceneChangeFeed.Drain` cleared the
+  `StructureDirty` flag before the sync tick read it, so the sweep that turns hierarchy changes
+  into `add_node` / `remove_node` / `reparent` / `reorder_children` / `add_component` /
+  `remove_component` ops ran zero times. Only `set_property` ever reached the room: moving an
+  existing object synced, creating or deleting one did not. The drain now hands the flag back to
+  the caller and consumes it once.
+- **A created object arrived as an empty Transform.** The `add_node` payload carries only name,
+  active state and transform, so components travel as their own `add_component` ops. The sender
+  baselined the component signature at creation time, which told the next sweep there was nothing
+  to send — the peer got an invisible object where a cube should be. Non-prefab creations now
+  start with an empty component baseline, so `MeshFilter` / `MeshRenderer` / `Collider` follow the
+  add op in the same sweep.
+
 ## [0.4.1] — 2026-10-31
 
 ### Added
