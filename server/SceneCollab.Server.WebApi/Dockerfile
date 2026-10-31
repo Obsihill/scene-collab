@@ -25,6 +25,9 @@ ENV SCENECOLLAB_BIND=0.0.0.0 \
 
 EXPOSE 8080
 
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s \
+  CMD ["dotnet", "SceneCollab.Server.WebApi.dll", "--health-check"]
+
 # Non-root: the image default user already exists in the aspnet base image.
 USER $APP_UID
 

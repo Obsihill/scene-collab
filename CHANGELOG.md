@@ -7,6 +7,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.2] — 2026-10-31
+
+Verified against the published image, not just a local build: a headless Unity editor and a
+non-Unity WebSocket peer exchanged a cube move in both directions through
+`ghcr.io/obsihill/scene-collab`.
+
+### Fixed
+
+- `/health` reported `serverVersion: 0.1.0` while the package was 0.2.x — the assembly version was
+  never bumped.
+- The container healthcheck ran `dotnet --info`, which passes as long as the .NET host exists. It now
+  runs `--health-check`, a real GET to `/health` from inside the container (the runtime image has no
+  curl or bash).
+- `tools/live-run.sh` can point at an already-running server (`EXTERNAL_URL`/`EXTERNAL_TOKEN`) and
+  passes native paths to Unity instead of MSYS ones, which Unity cannot open.
+
 ## [0.2.1] — 2026-10-31
 
 Release plumbing only; no behaviour change in the editor.

@@ -1,5 +1,6 @@
 using System;
 using System.Linq;
+using System.Net.Http;
 using System.Net.WebSockets;
 using System.Reflection;
 using System.Security.Cryptography;
@@ -29,6 +30,14 @@ using SceneCollab.Server.WebApi.WebSockets;
 
 var startedUtc = DateTime.UtcNow;
 var serverVersion = Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "0.0.0";
+
+// `--health-check` lets a container runtime ask this build whether the process is actually serving.
+// The runtime image ships no curl or bash, and probing with `dotnet --info` only proves the .NET host
+// exists, which turns an unhealthy server into a green check.
+if (args.Contains("--health-check"))
+{
+    return await ProbeSelfAsync();
+}
 
 var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddSingleton<SessionHub>();
@@ -200,4 +209,24 @@ static bool FixedTimeEquals(string provided, string expected)
 static string NewClientId()
 {
     return Guid.NewGuid().ToString("N").Substring(0, 10);
+}
+
+static async Task<int> ProbeSelfAsync()
+{
+    var port = Environment.GetEnvironmentVariable("SCENECOLLAB_PORT");
+    if (string.IsNullOrWhiteSpace(port))
+    {
+        port = "8080";
+    }
+
+    try
+    {
+        using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(3) };
+        using var response = await client.GetAsync("http://127.0.0.1:" + port + "/health");
+        return response.IsSuccessStatusCode ? 0 : 1;
+    }
+    catch (Exception)
+    {
+        return 1;
+    }
 }
