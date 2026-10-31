@@ -111,7 +111,13 @@ bash tools/live-run.sh          # UNITY=/path/to/Unity if it is not in the defau
 
 It publishes the server, starts it on `127.0.0.1:8100` with a throwaway token, and exits `0` only if
 the peer's move landed in the editor **and** the editor's move came back to the peer. Each stage
-writes a JSON file under `artifacts/live/`, so a failure names the direction that broke.
+writes a JSON file under `artifacts/live/`, so a failure names the direction that broke. Point it at
+an already-running server with `EXTERNAL_URL=...` / `EXTERNAL_TOKEN=...` — that is how the shipped
+container image is checked:
+
+```bash
+EXTERNAL_URL=ws://127.0.0.1:8102/ws EXTERNAL_TOKEN=<token> bash tools/live-run.sh
+```
 
 Unity package tests run from any project that references the package; add it to `testables`
 in `Packages/manifest.json`:
