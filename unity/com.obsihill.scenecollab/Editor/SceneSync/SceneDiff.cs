@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using SceneCollab.Contracts.Protocol;
 using SceneCollab.Domain;
+using UnityEditor;
 using UnityEngine;
 
 namespace SceneCollab.Editor.SceneSync
@@ -92,7 +93,7 @@ namespace SceneCollab.Editor.SceneSync
                 SceneOperation operation;
                 string error;
                 if (SceneOperation.TryCreate(
-                        OpKinds.SetProperty, nodeId, path, previous, current, out operation, out error))
+                        KindFor(gameObject), nodeId, path, previous, current, out operation, out error))
                 {
                     operations.Add(operation);
                 }
@@ -103,6 +104,22 @@ namespace SceneCollab.Editor.SceneSync
             }
 
             return operations;
+        }
+
+        /// <summary>
+        /// The op kind a property change on this object must travel as.
+        ///
+        /// A value written on a prefab instance is not an edit to the instance until Unity records it as
+        /// a modification; writing through SerializedProperty alone can land in memory and be dropped at
+        /// save time. <c>set_prefab_override</c> is the kind whose apply path calls
+        /// <c>RecordPrefabInstancePropertyModifications</c>, so anything inside a prefab instance goes
+        /// that way — including Transform, whose override Unity would otherwise have to infer.
+        /// </summary>
+        public static string KindFor(GameObject gameObject)
+        {
+            return gameObject != null && PrefabUtility.IsPartOfPrefabInstance(gameObject)
+                ? OpKinds.SetPrefabOverride
+                : OpKinds.SetProperty;
         }
 
         /// <summary>

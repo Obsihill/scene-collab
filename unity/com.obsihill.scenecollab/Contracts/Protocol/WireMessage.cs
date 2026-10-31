@@ -129,6 +129,35 @@ namespace SceneCollab.Contracts.Protocol
 
         /// <summary>Number of assets the host's scene depends on; sent with the manifest.</summary>
         public int assetCount;
+
+        // ── v0.4.3: peer scene-view presence ─────────────────────────────────────
+
+        /// <summary>
+        /// True when a <c>view</c> message carries a usable camera pose. A peer that has no scene
+        /// view open (or a stale sender) leaves it false and is not drawn.
+        /// </summary>
+        public bool viewValid;
+
+        /// <summary>Scene-view camera world position (editor-only overlay; never part of the scene).</summary>
+        public float viewPosX;
+        public float viewPosY;
+        public float viewPosZ;
+
+        /// <summary>Scene-view camera world rotation as a quaternion (x, y, z, w).</summary>
+        public float viewRotX;
+        public float viewRotY;
+        public float viewRotZ;
+        public float viewRotW;
+
+        /// <summary>Scene-view camera vertical field of view in degrees, for the frustum gizmo.</summary>
+        public float viewFov;
+
+        /// <summary>
+        /// True when the op is part of a host snapshot rather than a live edit. The applier uses it
+        /// only to keep the "someone overwrote your value" counter honest: a baseline is expected to
+        /// replace values and must not read as a conflict.
+        /// </summary>
+        public bool snapshot;
     }
 
     /// <summary>

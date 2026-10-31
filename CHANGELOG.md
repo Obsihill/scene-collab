@@ -7,6 +7,44 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.3] — 2026-11-01
+
+### Added
+
+- **Late joiners get the host's scene.** Until now a participant who joined after the edits started
+  saw an empty scene: the server holds the op log, not the scene, and nothing replayed it. The host
+  now diffs on demand — `snapshot_start` → per-node `add_node` / `add_component` / `set_property` /
+  `set_prefab_override` → `snapshot_end` (node count) — and streams it in chunks, one chunk in flight
+  at a time. Nodes the joiner holds that the host does not are removed, so the result is the host's
+  scene, not a union. Local diffing is suppressed while a snapshot is being applied, and a snapshot
+  never carries `oldValue`: the host is stating what the scene *is*, not what changed.
+- **Peer scene-view cameras.** Each editor publishes its `SceneView` pose (`view`, ~10 Hz, only when
+  the camera actually moved) and every other editor draws it as a small camera body with a frustum
+  and a name label, tinted with that participant's presence colour. It is an editor overlay
+  (`HideFlags.DontSave`), never a scene object, never saved, never an op. `view` messages skip the
+  revision and the op log entirely. Toggle: **Show peer cameras** in the window. A camera that stops
+  publishing disappears after 5 s.
+- **Prefab instance fields now survive the round trip.** A `set_property` on an object that belongs
+  to a prefab instance is sent as `set_prefab_override` instead, which is the only path that ends in
+  `RecordPrefabInstancePropertyModifications` — that is what keeps the override from being dropped
+  when the receiver saves.
+
+### Fixed
+
+- **Adding a root-level object threw on the receiver.** `ApplyAddNode` read
+  `created.transform.parent.childCount` to restore the sibling index; a root object has no parent, so
+  every `add_node` of a top-level object failed with a `NullReferenceException` on the receiving
+  editor. Guarded — this is also why objects created at the scene root did not appear on peers.
+- **`set_property` on a prefab instance reached the receiver as a plain scene property.** See above;
+  the receiver's `RecordPrefabInstancePropertyModifications` call was unreachable in practice.
+
+### Changed
+
+- A **host** snapshot is exempt from object locks (a guest holding a lock on one node must not leave
+  the late joiner with a half-built scene). The exemption is host-only: a guest cannot mark its ops as
+  `snapshot` to skip a lock.
+- `op` broadcast frames carry `accepted: true` and a `snapshot` flag.
+
 ## [0.4.2] — 2026-11-01
 
 ### Fixed

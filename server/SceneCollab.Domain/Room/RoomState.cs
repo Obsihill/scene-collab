@@ -341,8 +341,15 @@ namespace SceneCollab.Domain.Room
 
                 // Object lock: a node being restructured by one editor is off limits to the others.
                 // Rejecting (rather than applying and hoping) is what makes hierarchy edits predictable.
+                //
+                // A host snapshot is the exception: it states what the scene *is*, and a guest holding a
+                // lock on a node must not leave the late joiner with a half-built scene. The exemption is
+                // host-only so a guest cannot mark its own ops as a snapshot to skip the lock.
+                var isHostSnapshot = op.snapshot && string.Equals(op.clientId, _hostClientId, StringComparison.Ordinal);
                 string lockOwner;
-                if (!string.IsNullOrEmpty(op.nodeId) && _locks.TryGetValue(op.nodeId, out lockOwner)
+                if (!isHostSnapshot
+                    && !string.IsNullOrEmpty(op.nodeId)
+                    && _locks.TryGetValue(op.nodeId, out lockOwner)
                     && !string.Equals(lockOwner, op.clientId, StringComparison.Ordinal))
                 {
                     return ApplyResult.Reject(ErrorCodes.Locked, _revision, "node is locked by " + lockOwner);

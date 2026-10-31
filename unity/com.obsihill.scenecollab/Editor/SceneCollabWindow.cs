@@ -228,6 +228,38 @@ namespace SceneCollab.Editor
                 EditorGUILayout.LabelField("Applied / ignored", _sync.Applied + " / " + _sync.Ignored);
                 EditorGUILayout.LabelField("Last", string.IsNullOrEmpty(_sync.LastNote) ? "—" : _sync.LastNote);
 
+                using (new EditorGUILayout.HorizontalScope())
+                {
+                    var showCameras = EditorGUILayout.ToggleLeft("Show peer cameras", _sync.Presence.Show);
+                    if (showCameras != _sync.Presence.Show)
+                    {
+                        _sync.Presence.Show = showCameras;
+                        SceneView.RepaintAll();
+                    }
+
+                    EditorGUILayout.LabelField(_sync.Presence.PeerCount + " camera(s)", GUILayout.Width(90f));
+                }
+
+                if (connected)
+                {
+                    using (new EditorGUILayout.HorizontalScope())
+                    {
+                        if (!_session.IsHost && GUILayout.Button("Resync from host"))
+                        {
+                            // The escape hatch for a scene that drifted (a save from an old session, an
+                            // undo the room never saw). Cheap: it only asks, the host decides.
+                            _sync.RequestSnapshot();
+                            Log(_sync.LastNote);
+                        }
+
+                        if (_session.IsHost && GUILayout.Button("Send snapshot"))
+                        {
+                            _sync.QueueSnapshot("manual");
+                            Log(_sync.LastNote);
+                        }
+                    }
+                }
+
                 if (!string.IsNullOrEmpty(_sync.AssetNote))
                 {
                     EditorGUILayout.HelpBox(_sync.AssetNote + " — magenta boxes mark what this "

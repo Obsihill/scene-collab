@@ -137,7 +137,10 @@ namespace SceneCollab.Editor.SceneSync
             }
 
             var known = _diff.GetKnownValue(op.nodeId, op.propertyPath);
-            if (known != null && !SceneValueCodec.AreEqual(known, op.oldValue))
+
+            // A snapshot op carries no oldValue by design (the host is stating the truth, not proposing a
+            // change), so comparing against the local baseline would report every field as overwritten.
+            if (!op.snapshot && known != null && !SceneValueCodec.AreEqual(known, op.oldValue))
             {
                 Overwritten++;
             }
@@ -260,7 +263,10 @@ namespace SceneCollab.Editor.SceneSync
                 created.SetActive(payload.active);
             }
 
-            if (op.siblingIndex > 0 && op.siblingIndex < created.transform.parent.childCount)
+            // A root object has no parent transform; reading through it threw before this guard, which
+            // meant every snapshot (and every live add) of a root-level object failed on the receiver.
+            var parentTransform = created.transform.parent;
+            if (op.siblingIndex > 0 && parentTransform != null && op.siblingIndex < parentTransform.childCount)
             {
                 created.transform.SetSiblingIndex(op.siblingIndex);
             }

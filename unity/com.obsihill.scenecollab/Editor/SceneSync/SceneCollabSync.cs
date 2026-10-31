@@ -29,19 +29,27 @@ namespace SceneCollab.Editor.SceneSync
         readonly SceneStructure _structure;
         readonly SceneOpApplier _applier;
         readonly Queue<SceneOperation> _outbox = new Queue<SceneOperation>();
+        readonly Queue<WireMessage> _snapshotOutbox = new Queue<WireMessage>();
+        readonly SceneViewPresence _presence = new SceneViewPresence();
         readonly List<GameObject> _dirty = new List<GameObject>();
+        readonly SnapshotReceiver _snapshot = new SnapshotReceiver();
+        readonly HashSet<string> _peersSeen = new HashSet<string>(StringComparer.Ordinal);
 
         ISceneCollabSession _session;
         double _nextTick;
         bool _awaitingAck;
         bool _primed;
         bool _listening;
+        bool _snapshotInFlight;
+        bool _snapshotRequested;
+        int _snapshotChunksSent;
 
         public SceneCollabSync()
         {
             _structure = new SceneStructure(_registry);
             _applier = new SceneOpApplier(_registry, _diff, _structure);
             _feed.UndoRedoPerformed += OnUndoRedo;
+            SnapshotDeletesExtras = true;
         }
 
         public bool Enabled { get; private set; }
@@ -108,6 +116,43 @@ namespace SceneCollab.Editor.SceneSync
 
         public string AssetNote { get; private set; }
 
+        /// <summary>Snapshot frames sent to the room this session (host side).</summary>
+        public int SnapshotSent
+        {
+            get { return _snapshotChunksSent; }
+        }
+
+        /// <summary>True while a host snapshot is being applied (the local editor does not emit).</summary>
+        public bool SnapshotActive
+        {
+            get { return _snapshot.Active; }
+        }
+
+        /// <summary>Nodes the last snapshot claimed (guest side).</summary>
+        public int SnapshotNodes { get; private set; }
+
+        /// <summary>Ops the last snapshot applied (guest side).</summary>
+        public int SnapshotApplied
+        {
+            get { return _snapshot.Ops; }
+        }
+
+        /// <summary>Snapshots the room refused (stale revision, bad payload); the host logs and stops.</summary>
+        public int SnapshotFailures { get; private set; }
+
+        /// <summary>
+        /// When true (default), a finished snapshot deletes objects this editor has that the host does
+        /// not: the host's scene is the truth, and leftovers from an older session would otherwise drift
+        /// forever.
+        /// </summary>
+        public bool SnapshotDeletesExtras { get; set; }
+
+        /// <summary>Other editors' SceneView cameras, drawn as an editor overlay.</summary>
+        public SceneViewPresence Presence
+        {
+            get { return _presence; }
+        }
+
         public void Bind(ISceneCollabSession session)
         {
             if (ReferenceEquals(_session, session))
@@ -128,6 +173,8 @@ namespace SceneCollab.Editor.SceneSync
             _session.StateChanged += OnStateChanged;
             _session.LocksChanged += OnLocksChanged;
             _session.AssetManifestChanged += OnAssetManifestChanged;
+            _session.ParticipantsChanged += OnParticipantsChanged;
+            _presence.Bind(_session);
         }
 
         public void Unbind()
@@ -139,8 +186,14 @@ namespace SceneCollab.Editor.SceneSync
                 _session.StateChanged -= OnStateChanged;
                 _session.LocksChanged -= OnLocksChanged;
                 _session.AssetManifestChanged -= OnAssetManifestChanged;
+                _session.ParticipantsChanged -= OnParticipantsChanged;
             }
 
+            _snapshotOutbox.Clear();
+            _peersSeen.Clear();
+            _snapshot.Abort();
+            _snapshotInFlight = false;
+            _presence.Unbind();
             _session = null;
         }
 
@@ -155,6 +208,8 @@ namespace SceneCollab.Editor.SceneSync
             Enabled = true;
             _awaitingAck = false;
             _outbox.Clear();
+            _snapshotOutbox.Clear();
+            _snapshotRequested = false;
             PrimeActiveScene();
 
             _feed.Attach();
@@ -270,9 +325,23 @@ namespace SceneCollab.Editor.SceneSync
 
             _nextTick = now + TickIntervalSeconds;
 
+            // Camera presence runs on the same clock but is not gated by a primed scene: a guest can see
+            // where the host is looking before it has a single node id.
+            _presence.Tick();
+
             if (!_primed)
             {
                 PrimeActiveScene();
+            }
+
+            if (_snapshot.Active)
+            {
+                // A snapshot is landing. Emitting local diffs now would race the baseline we are
+                // rebuilding op by op, and every value the snapshot writes would look like a local edit.
+                _feed.Drain(_dirty);
+                _dirty.Clear();
+                PumpOutbox();
+                return;
             }
 
             _dirty.Clear();
@@ -459,12 +528,38 @@ namespace SceneCollab.Editor.SceneSync
 
         void PumpOutbox()
         {
-            if (_awaitingAck || _outbox.Count == 0)
+            if (_awaitingAck)
             {
                 return;
             }
 
             if (_session == null || _session.State != CollabConnectionState.Connected)
+            {
+                return;
+            }
+
+            if (_snapshotOutbox.Count > 0)
+            {
+                var frame = _snapshotOutbox.Dequeue();
+                if (!_session.SendSnapshotFrame(frame))
+                {
+                    _snapshotOutbox.Clear();
+                    LastNote = "not connected; snapshot dropped";
+                    return;
+                }
+
+                _snapshotInFlight = true;
+                _awaitingAck = true;
+                if (frame.opKind == OpKinds.SnapshotChunk)
+                {
+                    _snapshotChunksSent++;
+                }
+
+                LastNote = "snapshot " + frame.opKind + " (" + _snapshotOutbox.Count + " left)";
+                return;
+            }
+
+            if (_outbox.Count == 0)
             {
                 return;
             }
@@ -488,6 +583,25 @@ namespace SceneCollab.Editor.SceneSync
             if (message == null)
             {
                 return;
+            }
+
+            switch (message.opKind)
+            {
+                case OpKinds.SnapshotStart:
+                    BeginSnapshot(message);
+                    return;
+
+                case OpKinds.SnapshotChunk:
+                    ApplySnapshotChunk(message);
+                    return;
+
+                case OpKinds.SnapshotEnd:
+                    FinishSnapshot(message);
+                    return;
+
+                case OpKinds.SnapshotRequest:
+                    OnSnapshotRequested(message);
+                    return;
             }
 
             string note;
@@ -515,6 +629,24 @@ namespace SceneCollab.Editor.SceneSync
         {
             _awaitingAck = false;
 
+            if (_snapshotInFlight)
+            {
+                _snapshotInFlight = false;
+
+                if (message != null && !message.accepted && !message.duplicate)
+                {
+                    // A rejected frame means the room moved on (stale revision) or the payload was
+                    // refused. Retrying would rebuild a scene against a revision that has changed again,
+                    // so the snapshot is abandoned and reported; the next request starts clean.
+                    _snapshotOutbox.Clear();
+                    SnapshotFailures++;
+                    LastNote = "snapshot aborted: " + (message.code ?? "unknown");
+                }
+
+                PumpOutbox();
+                return;
+            }
+
             if (message != null && !message.accepted && !message.duplicate)
             {
                 Rejected++;
@@ -541,6 +673,238 @@ namespace SceneCollab.Editor.SceneSync
             {
                 PublishManifest();
             }
+
+            if (_session != null && _session.State == CollabConnectionState.Connected && Enabled && !_session.IsHost)
+            {
+                // A guest that just joined has an empty registry: it cannot know what it is missing until
+                // the host sends a snapshot, so ask as soon as the socket is usable.
+                RequestSnapshot();
+            }
+        }
+
+        // ── snapshot: host → late joiner ──────────────────────────────────────
+
+        void OnParticipantsChanged()
+        {
+            if (_session == null || !Enabled)
+            {
+                return;
+            }
+
+            var current = new HashSet<string>(StringComparer.Ordinal);
+            var joined = false;
+
+            var participants = _session.Participants;
+            for (var i = 0; i < participants.Count; i++)
+            {
+                var participant = participants[i];
+                if (participant == null || string.IsNullOrEmpty(participant.clientId))
+                {
+                    continue;
+                }
+
+                current.Add(participant.clientId);
+
+                if (!string.Equals(participant.clientId, _session.ClientId, StringComparison.Ordinal)
+                    && _peersSeen.Add(participant.clientId))
+                {
+                    joined = true;
+                }
+            }
+
+            // Drop departed peers so a rejoin is treated as new again.
+            _peersSeen.IntersectWith(current);
+
+            if (!joined)
+            {
+                return;
+            }
+
+            if (_session.IsHost)
+            {
+                QueueSnapshot("a peer joined");
+            }
+            else
+            {
+                // Someone arrived, or this editor is the one that just came back: either way asking is
+                // cheaper than guessing whether the local scene is current.
+                RequestSnapshot();
+            }
+        }
+
+        /// <summary>Guest side: tell the host this editor has nothing and wants a baseline.</summary>
+        public void RequestSnapshot()
+        {
+            if (_session == null || _session.State != CollabConnectionState.Connected || _snapshotRequested)
+            {
+                return;
+            }
+
+            _snapshotRequested = true;
+            _snapshotOutbox.Enqueue(new WireMessage
+            {
+                snapshot = true,
+                opKind = OpKinds.SnapshotRequest,
+                propertyPath = "",
+                oldValue = "",
+                newValue = "",
+            });
+
+            LastNote = "asked the host for a snapshot";
+        }
+
+        /// <summary>Host side: build the whole scene into frames and queue them one ack at a time.</summary>
+        public bool QueueSnapshot(string reason)
+        {
+            if (_session == null || _session.State != CollabConnectionState.Connected)
+            {
+                return false;
+            }
+
+            if (_snapshotOutbox.Count > 0)
+            {
+                // A snapshot is already on its way; a second one would race it into a half-applied scene.
+                LastNote = "snapshot already queued";
+                return false;
+            }
+
+            List<WireMessage> frames;
+            string note;
+            if (!SceneSnapshot.TryBuild(SceneManager.GetActiveScene(), _registry, out frames, out note))
+            {
+                LastNote = "snapshot skipped: " + note;
+                return false;
+            }
+
+            for (var i = 0; i < frames.Count; i++)
+            {
+                _snapshotOutbox.Enqueue(frames[i]);
+            }
+
+            LastNote = "snapshot queued (" + reason + "): " + note;
+            return true;
+        }
+
+        void BeginSnapshot(WireMessage message)
+        {
+            if (_session != null && string.Equals(message.clientId, _session.ClientId, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            _snapshot.Begin();
+            LastNote = "snapshot from " + (string.IsNullOrEmpty(message.displayName) ? "host" : message.displayName) + " — receiving";
+        }
+
+        void ApplySnapshotChunk(WireMessage message)
+        {
+            if (!_snapshot.Active)
+            {
+                return;
+            }
+
+            if (!_snapshot.ApplyChunk(message.newValue, _applier))
+            {
+                LastNote = "snapshot: " + (_snapshot.LastError ?? "unreadable chunk");
+                _snapshot.Abort();
+                return;
+            }
+
+            LastNote = "snapshot " + _snapshot.Chunks + "/" + _snapshot.TotalChunks
+                + " — " + _snapshot.Ops + " op(s)";
+        }
+
+        void FinishSnapshot(WireMessage message)
+        {
+            if (!_snapshot.Active)
+            {
+                return;
+            }
+
+            var claimed = _snapshot.End();
+            var ops = _snapshot.Ops;
+            var removed = RemoveExtras(claimed);
+
+            // The applier wrote every value, so a fresh baseline is what keeps those writes from looking
+            // like local edits on the next tick.
+            PrimeActiveScene();
+
+            SnapshotNodes = claimed.Count;
+            LastNote = "snapshot done: " + claimed.Count + " node(s), " + ops + " op(s), " + removed + " removed";
+        }
+
+        int RemoveExtras(HashSet<string> claimed)
+        {
+            if (!SnapshotDeletesExtras)
+            {
+                return 0;
+            }
+
+            var scene = SceneManager.GetActiveScene();
+            var extras = new List<GameObject>();
+            var extraIds = new List<string>();
+
+            foreach (var gameObject in SceneNodeRegistry.EnumerateSceneObjects(scene))
+            {
+                if (gameObject == null)
+                {
+                    continue;
+                }
+
+                // A child of a prefab instance cannot be deleted on its own, and the host's prefab is the
+                // same asset: its presence is not drift.
+                if (PrefabUtility.IsPartOfPrefabInstance(gameObject)
+                    && !PrefabUtility.IsOutermostPrefabInstanceRoot(gameObject))
+                {
+                    continue;
+                }
+
+                string nodeId;
+                if (!_registry.TryGetNodeId(gameObject, out nodeId) || string.IsNullOrEmpty(nodeId))
+                {
+                    continue;
+                }
+
+                if (claimed.Contains(nodeId))
+                {
+                    continue;
+                }
+
+                extras.Add(gameObject);
+                extraIds.Add(nodeId);
+            }
+
+            var removed = 0;
+            for (var i = 0; i < extras.Count; i++)
+            {
+                var gameObject = extras[i];
+                if (gameObject == null)
+                {
+                    continue;
+                }
+
+                _structure.Forget(extraIds[i]);
+                _diff.Forget(extraIds[i]);
+                _registry.Forget(gameObject);
+                UnityEngine.Object.DestroyImmediate(gameObject);
+                removed++;
+            }
+
+            return removed;
+        }
+
+        void OnSnapshotRequested(WireMessage message)
+        {
+            if (_session == null || !Enabled || !_session.IsHost)
+            {
+                return;
+            }
+
+            var who = string.IsNullOrEmpty(message.displayName)
+                ? (string.IsNullOrEmpty(message.clientId) ? "a guest" : message.clientId)
+                : message.displayName;
+
+            QueueSnapshot(who + " asked");
         }
 
         void OnLocksChanged()

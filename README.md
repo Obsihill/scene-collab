@@ -29,7 +29,10 @@ locked so two people cannot fight over the same GameObject.
 | Value ops (`set_property`): transform, name, active, enabled, component fields | done |
 | Structural ops: `add_node`, `remove_node`, `reparent`, `reorder_children`, `add_component` | done (host-only, lock-guarded) |
 | Asset manifest + placeholders for missing assets | done |
-| Prefab instance `m_Modifications`, `TerrainData` | not yet — see [roadmap](#roadmap) |
+| Late joiner: host streams the full scene as a chunked snapshot | done |
+| Prefab instance overrides (`set_prefab_override` promotion) | done |
+| Peer scene-view cameras (editor overlay, `view` messages) | done |
+| `TerrainData`, prefab-instance structural edits | not yet — see [roadmap](#roadmap) |
 
 Verified end to end, not by unit tests alone:
 
@@ -38,14 +41,18 @@ Verified end to end, not by unit tests alone:
   `(2, 3, 4)`, then deletes it; the editor asserts the object, its position, the node-id binding and
   its removal.
 - `tools/live-run.sh` — value edits move in both directions.
-- 24 server tests, 36 EditMode tests.
+- `tools/SceneCollab.V043Probe` — 19 checks against a live server: snapshot start/chunk/end relayed
+  with the `snapshot` flag, a host snapshot allowed through a guest's lock while a guest's "snapshot"
+  is still refused (`locked`), and a camera pose delivered to the peer but not echoed to its sender and
+  without moving the revision.
+- 28 server tests, 62 EditMode tests.
 
 ## 1. Install the Unity package
 
 `Packages/manifest.json`:
 
 ```jsonc
-"com.obsihill.scenecollab": "https://github.com/Obsihill/scene-collab.git?path=unity/com.obsihill.scenecollab#v0.4.2"
+"com.obsihill.scenecollab": "https://github.com/Obsihill/scene-collab.git?path=unity/com.obsihill.scenecollab#v0.4.3"
 ```
 
 Then `Tools > Scene Collab`. Requires Unity **6000.0 or newer**.
@@ -81,7 +88,8 @@ two-cube scene to try the session on. It contains no project assets on purpose.
 
 ## What syncs, and what does not
 
-The honest version, by feature. "Host-only" means the op is refused unless the sender is the host.
+The honest version, by feature. "Lock-guarded" means the op is refused while another participant holds
+that node's lock. Any participant may restructure — but only the host can save the scene file.
 
 | Edit | Syncs? | Notes |
 |---|---|---|
@@ -93,11 +101,13 @@ The honest version, by feature. "Host-only" means the op is refused unless the s
 | Small scalar arrays (`float[]`, `int[]`, `bool[]`, `string[]`, `Vector2/3/4[]`, `Color[]`, enums) | yes | up to 64 elements, travels as one value, resizing included |
 | Arrays past 64 elements, empty arrays | **no** | nothing to compare and no bound on the payload |
 | Object/asset reference fields, `AnimationCurve`, `Gradient` | **no** | unsupported types are skipped silently on the sender |
-| Create / delete a GameObject | yes | host-only, needs the node-id lock |
-| Reparent, reorder children | yes | host-only, lock-guarded |
+| Create / delete a GameObject | yes | any participant; lock-guarded |
+| Reparent, reorder children | yes | lock-guarded |
 | Add a component | yes | lock-guarded; a type this project lacks leaves a labelled stand-in |
 | Remove a component | yes | lock-guarded, replay-safe |
-| Prefab instance field overrides (`m_Modifications`) | yes | written and pinned with `RecordPrefabInstancePropertyModifications`; the array order is not normalised |
+| Prefab instance field overrides (`m_Modifications`) | yes | sent as `set_prefab_override`, applied as one, pinned with `RecordPrefabInstancePropertyModifications`; the array order is not normalised |
+| Restoring a field to the prefab's default | **no** | the override is removed locally without an op, so a peer keeps the old override |
+| Joining after the session started | yes | the host streams its whole scene as a snapshot; the joiner ends up with the host's scene, not a merge |
 | Add / remove a component *of a prefab instance* | **no** | the instance's `addedObjects` list is not carried |
 | Terrain heightmap / splatmap / trees / details | **no** | terrain stays host-only, v0.5 |
 | Materials and other **assets** | **no** | shared through Git, by design |
@@ -105,7 +115,8 @@ The honest version, by feature. "Host-only" means the op is refused unless the s
 | More than one scene per session | **no** | one active scene; a different scene GUID is refused |
 | Undo / redo | **no** | each editor's undo stack stays local |
 | Saving the scene | **host only** | other editors' saves are blocked with a warning |
-| Selection, camera, cursor, inspector focus | **no** | not modelled |
+| Selection, cursor, inspector focus | **no** | not modelled |
+| Peer camera positions | yes, as an overlay | `view` messages draw a camera gizmo in the scene view; nothing is written to the scene |
 
 Two participants editing the **same value** resolve last-writer-wins. Two participants restructuring
 the **same object** is prevented by the lock, not resolved after the fact.
@@ -183,9 +194,10 @@ in `Packages/manifest.json`:
 3. **v0.3** — scene-level sessions: `/rooms` scene list, scene-GUID handshake, host = scribe, host
    promotion, structural ops under object lock, component adds, asset manifest and placeholders.
 4. **v0.4** — component removal, missing-script stand-ins, prefab field overrides. ✅
-5. **v0.5** — `samples~` demo scene, prefab-instance structural edits (`addedObjects`), `TerrainData`
+5. **v0.4.3** — late-joiner snapshot, prefab override promotion, peer scene-view cameras. ✅
+6. **v0.5** — `samples~` demo scene, prefab-instance structural edits (`addedObjects`), `TerrainData`
    delta channel (stroke-sized region deltas, terrain lock).
-6. **v1.0** — first-run wizard (Lv1 host mode: server spawned locally, 6-digit code).
+7. **v1.0** — first-run wizard (Lv1 host mode: server spawned locally, 6-digit code).
 
 ## License
 

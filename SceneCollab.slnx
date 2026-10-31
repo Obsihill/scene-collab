@@ -12,5 +12,7 @@
   <Folder Name="/tools/">
     <Project Path="tools/SceneCollab.Remote/SceneCollab.Remote.csproj" />
     <Project Path="tools/SceneCollab.Smoke/SceneCollab.Smoke.csproj" />
+    <Project Path="tools/SceneCollab.V03Probe/SceneCollab.V03Probe.csproj" />
+    <Project Path="tools/SceneCollab.V043Probe/SceneCollab.V043Probe.csproj" />
   </Folder>
 </Solution>

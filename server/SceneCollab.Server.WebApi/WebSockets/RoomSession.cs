@@ -178,6 +178,10 @@ namespace SceneCollab.Server.WebApi.WebSockets
                             await HandleAssetsAsync(connection, message, cancellationToken).ConfigureAwait(false);
                             break;
 
+                        case MessageTypes.View:
+                            await HandleViewAsync(connection, message, cancellationToken).ConfigureAwait(false);
+                            break;
+
                         default:
                             await SendErrorAsync(connection, ErrorCodes.Malformed, "unknown type " + message.type, cancellationToken)
                                 .ConfigureAwait(false);
@@ -298,6 +302,9 @@ namespace SceneCollab.Server.WebApi.WebSockets
                 // Carried here so a receiver can label the edit ("Obsihill moved Cube") without
                 // having to match clientId against a roster it may have missed.
                 displayName = connection.DisplayName,
+                // A broadcast that reaches a peer has already been accepted by the room; the old `false`
+                // read as "rejected" in client-side logs.
+                accepted = true,
                 opKind = record.Kind,
                 nodeId = record.NodeId,
                 propertyPath = record.PropertyPath,
@@ -307,9 +314,42 @@ namespace SceneCollab.Server.WebApi.WebSockets
                 siblingIndex = message.siblingIndex,
                 componentType = message.componentType,
                 prefabGuid = message.prefabGuid,
+                // Marks the op as part of a host snapshot so the receiver applies it without treating it
+                // as a concurrent edit (no conflict check, no undo entry).
+                snapshot = message.snapshot,
                 revision = record.Revision,
                 room = Key,
                 serverTime = record.TimestampUnixMs,
+            };
+
+            await BroadcastAsync(WireJson.Serialize(broadcast), connection.ClientId, cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        /// <summary>
+        /// Relays a peer's scene-view camera pose. Deliberately outside the op log: a camera moved 10x a
+        /// second is presence, not an edit, and letting it increment the revision would make every room
+        /// look busy and every op stale.
+        /// </summary>
+        async Task HandleViewAsync(ClientConnection connection, WireMessage message, CancellationToken cancellationToken)
+        {
+            var broadcast = new WireMessage
+            {
+                type = MessageTypes.View,
+                clientId = connection.ClientId,
+                displayName = connection.DisplayName,
+                room = Key,
+                revision = State.Revision,
+                viewValid = true,
+                viewPosX = message.viewPosX,
+                viewPosY = message.viewPosY,
+                viewPosZ = message.viewPosZ,
+                viewRotX = message.viewRotX,
+                viewRotY = message.viewRotY,
+                viewRotZ = message.viewRotZ,
+                viewRotW = message.viewRotW,
+                viewFov = message.viewFov,
+                serverTime = Now(),
             };
 
             await BroadcastAsync(WireJson.Serialize(broadcast), connection.ClientId, cancellationToken)

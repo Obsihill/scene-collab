@@ -87,6 +87,9 @@ namespace SceneCollab.Editor
         public event Action ParticipantsChanged;
         public event Action<WireMessage> OperationReceived;
         public event Action<WireMessage> OperationAcknowledged;
+
+        /// <summary>A peer's scene-view camera pose. Drawn as an overlay; never applied to the scene.</summary>
+        public event Action<WireMessage> ViewReceived;
         public event Action<string, string> ErrorReceived;
         public event Action LocksChanged;
         public event Action<int> AssetCountChanged;
@@ -192,6 +195,69 @@ namespace SceneCollab.Editor
             // Client-generated idempotency key: a reconnect replay of the same op must not apply twice.
             var opId = Guid.NewGuid().ToString("N");
             Send(operation.ToWire(ClientId, RoomName, Revision, opId));
+            return true;
+        }
+
+        /// <summary>
+        /// Sends one snapshot frame. Frames are ops on the wire so they stay ordered with edits, and
+        /// like any op they carry the revision this editor had applied — the caller must therefore
+        /// pace them one ack at a time, exactly as it paces edits.
+        /// </summary>
+        public bool SendSnapshotFrame(WireMessage frame)
+        {
+            if (State != CollabConnectionState.Connected || frame == null)
+            {
+                return false;
+            }
+
+            frame.type = MessageTypes.Op;
+            frame.protocolVersion = ProtocolVersion.Current;
+            frame.clientId = ClientId;
+            frame.room = RoomName;
+            frame.revision = Revision;
+            frame.opId = Guid.NewGuid().ToString("N");
+            frame.displayName = _displayName;
+            frame.snapshot = true;
+            Send(frame);
+            return true;
+        }
+
+        /// <summary>
+        /// Broadcasts this editor's scene-view camera pose. Fire-and-forget by design: a dropped pose
+        /// is superseded by the next one in a tenth of a second.
+        /// </summary>
+        public bool SendView(
+            float posX,
+            float posY,
+            float posZ,
+            float rotX,
+            float rotY,
+            float rotZ,
+            float rotW,
+            float fov)
+        {
+            if (State != CollabConnectionState.Connected)
+            {
+                return false;
+            }
+
+            Send(new WireMessage
+            {
+                type = MessageTypes.View,
+                clientId = ClientId,
+                room = RoomName,
+                displayName = _displayName,
+                sceneGuid = SceneGuid,
+                viewValid = true,
+                viewPosX = posX,
+                viewPosY = posY,
+                viewPosZ = posZ,
+                viewRotX = rotX,
+                viewRotY = rotY,
+                viewRotZ = rotZ,
+                viewRotW = rotW,
+                viewFov = fov,
+            });
             return true;
         }
 
@@ -523,6 +589,17 @@ namespace SceneCollab.Editor
                     }
 
                     ReplaceParticipants(message.participants);
+                    break;
+
+                case MessageTypes.View:
+                    // Camera poses are a presence detail, not an edit: they never touch the revision and
+                    // are never applied to the scene, only drawn.
+                    var viewHandler = ViewReceived;
+                    if (viewHandler != null)
+                    {
+                        viewHandler(message);
+                    }
+
                     break;
 
                 case MessageTypes.Op:

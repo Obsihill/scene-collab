@@ -61,17 +61,21 @@ server → op  (broadcast to every other client in the room)
 `accepted:true, duplicate:true` and does **not** advance the revision — that is what makes a
 reconnect safe.
 
-`oldValue` is mandatory except for `add_node`. The server compares it with its authoritative
-document and rejects a mismatch with `stale_revision` plus the current `revision`, so the client
-can resync without another round trip.
+`oldValue` is mandatory except for `add_node` and the snapshot kinds (`snapshot_start`,
+`snapshot_end`, and any op carrying the `snapshot` flag) — those state what the scene *is*, so there
+is nothing to compare against. For every other op the server compares it with its authoritative
+document and rejects a mismatch with `stale_revision` plus the current `revision`, so the client can
+resync without another round trip.
 
 Structural ops carry what the receiver needs to rebuild the same result: `parentNodeId` (empty for
 a scene root), `siblingIndex`, `componentType` (assembly-qualified-ish type name) and `prefabGuid`
 for a prefab instance. `add_node` sends an `AddNodePayload` JSON in `newValue`; `remove_node` sends
 the removed node's payload in `oldValue`, so a late joiner can be told what was deleted.
 
-Structural ops are **host-only** (`not_host`) and require the sender to hold the `nodeId` lock
-(`locked`).
+Structural ops require the sender to hold the `nodeId` lock (`locked`); any participant may
+restructure, but only the host may `SaveScene`. A **host snapshot** is exempt from locks — a guest
+holding a lock must not leave a late joiner with a half-built scene — and the exemption is host-only,
+so a guest cannot set `snapshot` to skip a lock (`locked`).
 
 ### op kinds
 
@@ -84,6 +88,32 @@ Structural ops are **host-only** (`not_host`) and require the sender to hold the
 | `add_component`, `remove_component` | add a component | yes |
 | `set_property` | scalar/vector property | no (last-write-wins) |
 | `set_prefab_override` | prefab instance modification | no |
+| `snapshot_start` | first op of a host snapshot (`newValue` = node count) | no |
+| `snapshot_chunk` | one chunk; `newValue` is a `SnapshotChunk` JSON (`ops[]`, `index`, `total`) | no |
+| `snapshot_end` | last op of a host snapshot (`newValue` = node count) | no |
+| `snapshot_request` | guest asks the host to resend (`newValue` = nodes it has) | no |
+
+### snapshots
+
+A participant who joins after edits began has an empty scene: the server keeps the op log, not the
+scene. The host therefore streams its scene on demand.
+
+```
+host  → op { opKind: "snapshot_start",   newValue: "<nodes>", snapshot: true }
+host  → op { opKind: "snapshot_chunk",   newValue: "<SnapshotChunk JSON>", snapshot: true }
+host  → op { opKind: "snapshot_chunk",   ... }                       // as many as needed
+host  → op { opKind: "snapshot_end",     newValue: "<nodes>", snapshot: true }
+guest → op { opKind: "snapshot_request", newValue: "<nodes it has>" } // optional nudge
+```
+
+- Chunks are sent **one at a time**: the next chunk waits for the ack of the previous one.
+- Parents always precede their children, so the receiver can build the hierarchy op by op.
+- The receiver removes nodes it holds that the snapshot did not mention, then records the snapshot's
+  node ids. The result is the host's scene, not a union of both.
+- Local diffing is suppressed until `snapshot_end`, so applying a snapshot does not echo back as new
+  ops.
+- A snapshot in flight does not block the room: other participants' ops still apply on the host, and
+  they simply arrive after the snapshot.
 
 ### value encoding
 
@@ -157,6 +187,18 @@ server → presence { type, participants[], revision }
 
 Selection is presence-only: it is how another editor draws "someone else is editing this".
 It never changes the document.
+
+## Scene-view cameras
+
+```
+client → view { type, sceneGuid, viewPosition, viewRotation, viewPivot, viewSize, viewFov }
+server → view (to every other participant in the room)
+```
+
+A camera pose is presence, not an edit: it never carries a `revision`, never enters the op log and is
+never replayed, so a peer camera cannot advance or corrupt the document. Clients publish at ~10 Hz and
+only when the pose actually changed; a receiver drops a peer camera after 5 s of silence. Poses are
+drawn as an editor overlay (`HideFlags.DontSave`) — they are not scene objects and are never saved.
 
 ## Room listing
 

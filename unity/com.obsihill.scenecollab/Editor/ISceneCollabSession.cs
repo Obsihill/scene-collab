@@ -96,6 +96,21 @@ namespace SceneCollab.Editor
         /// <summary>Requests or releases the edit lock on a node.</summary>
         bool SendLock(string nodeId, bool release);
 
+        /// <summary>
+        /// Sends one frame of a host snapshot (v0.4.3). Frames are ops on the wire, so they are ordered
+        /// with edits and rejected when stale; callers must pace them one acknowledgement at a time.
+        /// </summary>
+        bool SendSnapshotFrame(WireMessage frame);
+
+        /// <summary>
+        /// Broadcasts this editor's scene-view camera pose (v0.4.3). Presence only: never applied to the
+        /// scene, never advances the revision.
+        /// </summary>
+        bool SendView(float posX, float posY, float posZ, float rotX, float rotY, float rotZ, float rotW, float fov);
+
+        /// <summary>A peer's scene-view camera pose (v0.4.3), for the scene-view overlay.</summary>
+        event Action<WireMessage> ViewReceived;
+
         /// <summary>Tells the room how many assets the host's scene needs (host only).</summary>
         bool PublishAssetCount(int count);
 
