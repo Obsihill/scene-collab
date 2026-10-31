@@ -45,7 +45,7 @@ Verified end to end, not by unit tests alone:
 `Packages/manifest.json`:
 
 ```jsonc
-"com.obsihill.scenecollab": "https://github.com/Obsihill/scene-collab.git?path=unity/com.obsihill.scenecollab#v0.4.0"
+"com.obsihill.scenecollab": "https://github.com/Obsihill/scene-collab.git?path=unity/com.obsihill.scenecollab#v0.4.1"
 ```
 
 Then `Tools > Scene Collab`. Requires Unity **6000.0 or newer**.
@@ -74,6 +74,11 @@ with a warning rather than writing a diverging file.
 
 ---
 
+### Quickstart scene
+
+Package Manager → **Scene Collab** → *Samples* → **Quickstart Scene** → *Import* gives you a
+two-cube scene to try the session on. It contains no project assets on purpose.
+
 ## What syncs, and what does not
 
 The honest version, by feature. "Host-only" means the op is refused unless the sender is the host.
@@ -84,7 +89,10 @@ The honest version, by feature. "Host-only" means the op is refused unless the s
 | GameObject name, `activeSelf` | yes | |
 | Component `enabled` | yes | |
 | Component fields: `int`, `float`, `bool`, `string`, `enum`, `Vector2`, `Vector3`, `Quaternion`, `Color` | yes | any component, found by walking `SerializedProperty` |
-| Other field types: object/asset references, arrays and lists, `Vector4`, `Vector2Int`, `Vector3Int`, `Rect`, `Bounds`, `AnimationCurve`, `Gradient`, `LayerMask` | **no** | unsupported types are skipped silently on the sender |
+| `Vector4`, `Vector2Int`, `Vector3Int`, `Rect`, `RectInt`, `Bounds`, `BoundsInt`, `LayerMask` | yes | exact round-trip, no rounding |
+| Small scalar arrays (`float[]`, `int[]`, `bool[]`, `string[]`, `Vector2/3/4[]`, `Color[]`, enums) | yes | up to 64 elements, travels as one value, resizing included |
+| Arrays past 64 elements, empty arrays | **no** | nothing to compare and no bound on the payload |
+| Object/asset reference fields, `AnimationCurve`, `Gradient` | **no** | unsupported types are skipped silently on the sender |
 | Create / delete a GameObject | yes | host-only, needs the node-id lock |
 | Reparent, reorder children | yes | host-only, lock-guarded |
 | Add a component | yes | lock-guarded; a type this project lacks leaves a labelled stand-in |

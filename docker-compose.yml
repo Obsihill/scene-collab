@@ -10,6 +10,10 @@ services:
     env_file: .env
     environment:
       SCENECOLLAB_BIND: 0.0.0.0
+      # The listening port inside the container must stay 8080: .env sets SCENECOLLAB_PORT for the
+      # host side only, and env_file would otherwise hand the same value to the server, which would
+      # listen on a port nothing maps to and look "up" while refusing every request.
+      SCENECOLLAB_PORT: 8080
     ports:
       - "${SCENECOLLAB_PORT:-8080}:8080"
     healthcheck:

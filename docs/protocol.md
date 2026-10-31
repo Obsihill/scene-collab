@@ -85,6 +85,31 @@ Structural ops are **host-only** (`not_host`) and require the sender to hold the
 | `set_property` | scalar/vector property | no (last-write-wins) |
 | `set_prefab_override` | prefab instance modification | no |
 
+### value encoding
+
+Property values are plain strings, because the same op has to survive a JSON round-trip through
+both `JsonUtility` (Unity) and `System.Text.Json` (server). Everything is culture-invariant: `1.5`,
+never `1,5`, and floats use round-trip formatting so a value is exactly reversible.
+
+| type | wire form |
+|---|---|
+| `float` / `int` / `bool` / `string` / `enum` | the value itself; enums travel as their index |
+| `Vector2` / `Vector3` / `Vector4` / `Color` / `Quaternion` | comma-separated components (`x,y,z`) |
+| `Vector2Int` / `Vector3Int` / `RectInt` / `BoundsInt` | comma-separated integers |
+| `Rect` | `x,y,width,height` |
+| `Bounds` | `centerX,centerY,centerZ,extentX,extentY,extentZ` — extents, not size |
+| `LayerMask` | the mask as an integer |
+| arrays of the above (≤ 64 elements) | `count;element;element…` — `2;0,0,0;5,5,5` |
+
+A string inside an array escapes `%` → `%25` and `;` → `%3B`, so a separator can never be mistaken
+for the next element. Writing an array sets its size first, so a change in element count syncs too.
+Arrays larger than 64 elements and empty arrays are not tracked: there is nothing to compare, and
+one terrain layer would otherwise be a megabyte per keystroke.
+
+A value the codec cannot express is refused (`TryWrite` returns false) rather than approximated —
+the applier reports the rejection instead of writing a rounded number that quietly differs from the
+sender's scene.
+
 ### errors
 
 | code | when |

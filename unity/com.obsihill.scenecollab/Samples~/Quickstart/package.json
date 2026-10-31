@@ -1,0 +1,5 @@
+{
+  "displayName": "Quickstart Scene",
+  "description": "Two cubes and a directional light. Open it, then Tools > Scene Collab: the host opens this scene, everyone else picks it from the room list.",
+  "createSeparatePackage": false
+}

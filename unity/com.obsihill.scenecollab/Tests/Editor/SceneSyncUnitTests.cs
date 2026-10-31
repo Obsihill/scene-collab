@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using NUnit.Framework;
 using SceneCollab.Contracts.Protocol;
 using SceneCollab.Domain;
@@ -128,6 +129,39 @@ namespace SceneCollab.Editor.Tests
             first.Save(sidecar, _scene);
             _createdAssets.Add(sidecar);
             Assert.IsTrue(File.Exists(sidecar), "sidecar was not written: " + sidecar);
+        }
+
+        [Test]
+        public void ChangingAnArrayFieldProducesOneOpWithTheWholeArray()
+        {
+            var cube = SaveSceneWithCube("ArrayDiff", out _);
+            var line = cube.AddComponent<LineRenderer>();
+            line.positionCount = 2;
+            line.SetPositions(new[] { Vector3.zero, Vector3.one });
+
+            var registry = new SceneNodeRegistry();
+            var nodeId = registry.EnsureNodeId(cube);
+            var diff = new SceneDiff();
+
+            diff.Baseline(cube, nodeId);
+            Assert.AreEqual(0, diff.Collect(cube, nodeId).Count, "baseline must not emit anything");
+
+            line.SetPositions(new[] { Vector3.zero, new Vector3(5f, 5f, 5f) });
+
+            var operations = diff.Collect(cube, nodeId);
+            var operation = operations.FirstOrDefault(o => o.PropertyPath.EndsWith("/m_Positions", System.StringComparison.Ordinal));
+            Assert.IsNotNull(operation, "no array op; got: " + string.Join(", ", operations.Select(o => o.PropertyPath)));
+            Assert.AreEqual(OpKinds.SetProperty, operation.Kind);
+            Assert.AreEqual("2;0,0,0;1,1,1", operation.OldValue);
+            Assert.AreEqual("2;0,0,0;5,5,5", operation.NewValue);
+
+            // The same op applied on another object must land as one array write, not a no-op.
+            var other = SaveSceneWithCube("ArrayApply", out _);
+            var otherLine = other.AddComponent<LineRenderer>();
+            otherLine.positionCount = 2;
+            otherLine.SetPositions(new[] { Vector3.one, Vector3.one });
+            Assert.IsTrue(ScenePropertyAccess.TryWrite(other, operation.PropertyPath, operation.NewValue));
+            Assert.AreEqual(new Vector3(5f, 5f, 5f), otherLine.GetPosition(1));
         }
 
         [Test]

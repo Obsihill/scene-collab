@@ -82,11 +82,29 @@ namespace SceneCollab.Editor.SceneSync
 
                     var path = property.propertyPath;
 
-                    // Arrays are skipped wholesale: their elements are addressed by index, which is not
-                    // stable between editors, and a terrain or cloth array is megabytes of noise.
-                    if (SkipPaths.Contains(path) || property.isArray)
+                    // Arrays travel as one value (count + elements) when they are small and hold
+                    // scalars. Index-addressed element paths are not stable between editors, and a
+                    // terrain-sized array is megabytes of noise, so the rest stay unsynced.
+                    if (SkipPaths.Contains(path))
                     {
                         enterChildren = false;
+                        continue;
+                    }
+
+                    if (property.isArray)
+                    {
+                        enterChildren = false;
+                        if (!IsSyncableArray(property))
+                        {
+                            continue;
+                        }
+
+                        into.Add(Prefix + typeName + "/" + path);
+                        if (into.Count >= MaxFieldsPerObject)
+                        {
+                            return;
+                        }
+
                         continue;
                     }
 
@@ -119,12 +137,40 @@ namespace SceneCollab.Editor.SceneSync
                 case SerializedPropertyType.Color:
                 case SerializedPropertyType.Vector2:
                 case SerializedPropertyType.Vector3:
+                case SerializedPropertyType.Vector4:
                 case SerializedPropertyType.Quaternion:
+                case SerializedPropertyType.Vector2Int:
+                case SerializedPropertyType.Vector3Int:
+                case SerializedPropertyType.Rect:
+                case SerializedPropertyType.RectInt:
+                case SerializedPropertyType.Bounds:
+                case SerializedPropertyType.BoundsInt:
+                case SerializedPropertyType.LayerMask:
                     return true;
 
                 default:
                     return false;
             }
+        }
+
+        /// <summary>
+        /// A small array of scalars is one syncable value; an empty or oversized one is not, because
+        /// there is nothing to compare and no bound on the payload.
+        /// </summary>
+        public static bool IsSyncableArray(SerializedProperty property)
+        {
+            if (property == null || !property.isArray)
+            {
+                return false;
+            }
+
+            var count = property.arraySize;
+            if (count <= 0 || count > SceneValueCodec.MaxArrayElements)
+            {
+                return false;
+            }
+
+            return IsSyncable(property.GetArrayElementAtIndex(0).propertyType);
         }
 
         public static bool IsComponentPath(string path)

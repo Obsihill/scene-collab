@@ -7,6 +7,31 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.1] — 2026-10-31
+
+### Added
+
+- **Wider value codec.** `Vector4`, `Vector2Int`, `Vector3Int`, `Rect`, `RectInt`, `Bounds`,
+  `BoundsInt` and `LayerMask` now round-trip exactly. `Bounds` travels as centre + extents and comes
+  back as size.
+- **Small scalar arrays travel as one value** — `float[]`, `int[]`, `bool[]`, `string[]`,
+  `Vector2[]`, `Vector3[]`, `Vector4[]`, `Color[]` and enums, up to 64 elements. Wire form is
+  `count;element;element…` with `%` and `;` escaped inside elements, so resizing an array syncs too.
+- **Quickstart sample** (`Samples~/Quickstart`): two cubes and a light, no project assets.
+
+### Fixed
+
+- **`docker compose up -d` never answered a request.** `.env` set `SCENECOLLAB_PORT` for the host
+  side, but `env_file` passed the same value into the container, so the app listened on that port
+  inside the container while the mapping pointed at 8080. Compose now pins the container port to
+  8080 and `.env` only picks the host port. Verified: container `healthy`, `/health` on the host
+  port, 26-check protocol probe PASS against the compose deployment.
+
+### Notes
+
+- Arrays past 64 elements and empty arrays stay untracked — nothing to compare, no bound on payload.
+- Object/asset reference fields, `AnimationCurve` and `Gradient` remain unsynced.
+
 ## [0.4.0] — 2026-10-31
 
 Components and prefab overrides. v0.3 could add a component but never remove one, and a property

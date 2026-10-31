@@ -59,7 +59,7 @@ Nginx Proxy Manager 예시:
 `Packages/manifest.json`에 한 줄 추가:
 
 ```jsonc
-"com.obsihill.scenecollab": "https://github.com/Obsihill/scene-collab.git?path=unity/com.obsihill.scenecollab#v0.4.0"
+"com.obsihill.scenecollab": "https://github.com/Obsihill/scene-collab.git?path=unity/com.obsihill.scenecollab#v0.4.1"
 ```
 
 Unity가 패키지를 받아오면 메뉴에 **Tools > Scene Collab** 이 생깁니다.
@@ -125,7 +125,10 @@ Guest = 같은 씬을 받아서 함께 편집하는 사람
 | `m_Modifications` 배열 **순서 정규화** | 값과 오버라이드는 동기화되지만 배열 순서는 맞추지 않음 (Unity가 저장 시 재작성) |
 | 프리팹 **에셋** 자체 편집 | 씬 오브젝트가 아니라서 범위 밖. 에셋은 Git으로 공유 |
 | 오브젝트/에셋 **참조 필드**(머티리얼 슬롯, 프리팹 링크, 스크립트 참조 등) | 직렬화 타입 화이트리스트 밖 |
-| 배열·리스트, `Vector4`, `Vector2Int`, `Vector3Int`, `Rect`, `Bounds`, `AnimationCurve`, `Gradient`, `LayerMask` | 타입 지원 없음. 보내는 쪽에서 조용히 건너뜀 |
+| `Vector4`, `Vector2Int`, `Vector3Int`, `Rect`, `RectInt`, `Bounds`, `BoundsInt`, `LayerMask` | 지원. 값 손실 없이 왕복 |
+| 작은 스칼라 배열(최대 64개) — `float[]`, `int[]`, `string[]`, `Vector3[]`, `Color[]` 등 | 지원. 배열 하나가 값 하나로 이동하고, 개수 변경도 반영 |
+| 64개 초과 배열·빈 배열 | 미지원. 비교할 대상이 없고 전송량 상한도 없음 |
+| 오브젝트/에셋 참조 필드, `AnimationCurve`, `Gradient` | 미지원. 보내는 쪽에서 조용히 건너뜀 |
 | `TerrainData`(높이맵·스플랫·나무·디테일) | 1024² 한 장이 4MB급 → v0.5에 스트로크 단위 영역 델타로 분리. 그 전까지 터레인은 Host만 편집 |
 | 라이트맵 굽기·네비메시 베이크·터레인 LOD | 설계상 Host가 하고 저장 → Git 공유 |
 | 씬 여러 개 동시 편집 / 씬 간 이동 | 한 세션 = 한 씬 |
@@ -134,6 +137,12 @@ Guest = 같은 씬을 받아서 함께 편집하는 사람
 | 같은 값을 동시에 수정 | 마지막에 쓴 사람이 이김(LWW). 같은 오브젝트의 **구조**를 동시에 바꾸는 건 락으로 사전 차단 |
 
 ---
+
+## 샘플 씬으로 먼저 확인하기
+
+Package Manager → **Scene Collab** → *Samples* → **Quickstart Scene** → *Import* 후
+`Assets/Samples/.../Quickstart/Quickstart.unity`를 열면 큐브 2개 + 라이트만 있는 씬이 나옵니다.
+프로젝트 에셋이 섞이지 않아 세션 동작만 따로 확인할 때 편합니다.
 
 ## 4. 실측 근거
 
