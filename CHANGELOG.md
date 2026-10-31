@@ -7,6 +7,40 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-10-31
+
+Components and prefab overrides. v0.3 could add a component but never remove one, and a property
+edit on a prefab instance could land on the instance and still vanish at save time.
+
+### Added
+
+- **`remove_component`.** Relayed like the other structural kinds (lock-checked, `componentType` on
+  the echo), applied with `DestroyImmediate` so it works in batch mode. Removing a component twice is
+  applied instead of failed, so a replay after a reconnect does not abort the session.
+- **Missing scripts leave a stand-in.** `add_component` for a type this project does not have used to
+  be dropped with a note; it now attaches a labelled magenta marker naming the missing type, the same
+  way missing meshes and prefabs are already handled.
+- **`set_prefab_override`** is implemented. The property is written, then
+  `PrefabUtility.RecordPrefabInstancePropertyModifications` pins it into the instance's modification
+  list — writing through `SerializedProperty` alone can leave the value on the instance without an
+  override, which a save then throws away.
+
+### Fixed
+
+- **Component add and delete were never captured.** Neither fires a property modification nor a
+  hierarchy change, so a locally added or deleted component stayed local. A per-object component
+  signature is now compared on every structural sweep. The signature keeps duplicates: Unity allows
+  two colliders on one object, and a set would have reported that as no change.
+
+### Verified
+
+- Unity EditMode: **44/44** (was 36/36). Eight new cases cover component capture, remove, replay,
+  missing-script stand-ins and prefab override recording.
+- Probe over a live server: **26 checks** (was 23), including `remove_component` relay and lock.
+- Unity ↔ non-Unity round trip: a `.NET` guest adds a component to the host's scene, the host applies
+  it, the guest removes it, the host applies that too (`v03-host-comp.json`, `v03-host-comp-removed.json`).
+
+
 ## [0.3.0] — 2026-10-31
 
 Scene-level multiplayer. One editor hosts a scene, everyone else joins *that* scene by picking it

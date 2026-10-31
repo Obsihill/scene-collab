@@ -87,9 +87,10 @@ The honest version, by feature. "Host-only" means the op is refused unless the s
 | Other field types: object/asset references, arrays and lists, `Vector4`, `Vector2Int`, `Vector3Int`, `Rect`, `Bounds`, `AnimationCurve`, `Gradient`, `LayerMask` | **no** | unsupported types are skipped silently on the sender |
 | Create / delete a GameObject | yes | host-only, needs the node-id lock |
 | Reparent, reorder children | yes | host-only, lock-guarded |
-| Add a component | yes | host-only, lock-guarded |
-| Remove a component | **no** | v0.4 |
-| Prefab instance field overrides (`m_Modifications`) | **no** | the object is created/removed, the diff is v0.4 |
+| Add a component | yes | lock-guarded; a type this project lacks leaves a labelled stand-in |
+| Remove a component | yes | lock-guarded, replay-safe |
+| Prefab instance field overrides (`m_Modifications`) | yes | written and pinned with `RecordPrefabInstancePropertyModifications`; the array order is not normalised |
+| Add / remove a component *of a prefab instance* | **no** | the instance's `addedObjects` list is not carried |
 | Terrain heightmap / splatmap / trees / details | **no** | terrain stays host-only, v0.5 |
 | Materials and other **assets** | **no** | shared through Git, by design |
 | Lightmap bake, NavMesh bake, terrain LOD | **no** | host bakes and saves, then Git |
@@ -173,9 +174,9 @@ in `Packages/manifest.json`:
 2. **v0.2** — scene capture and apply for transform/name/active/enabled properties; scribe save.
 3. **v0.3** — scene-level sessions: `/rooms` scene list, scene-GUID handshake, host = scribe, host
    promotion, structural ops under object lock, component adds, asset manifest and placeholders.
-4. **v0.4** — prefab instance creation/removal and `m_Modifications` normalisation, component removal,
-   missing-script stubs, `samples~`.
-5. **v0.5** — `TerrainData` delta channel (stroke-sized region deltas, terrain lock).
+4. **v0.4** — component removal, missing-script stand-ins, prefab field overrides. ✅
+5. **v0.5** — `samples~` demo scene, prefab-instance structural edits (`addedObjects`), `TerrainData`
+   delta channel (stroke-sized region deltas, terrain lock).
 6. **v1.0** — first-run wizard (Lv1 host mode: server spawned locally, 6-digit code).
 
 ## License

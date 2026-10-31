@@ -165,6 +165,32 @@ Check("relay keeps the sibling index", relayed?.siblingIndex == 2, "siblingIndex
 Check("relay keeps the component type", relayed?.componentType == "UnityEngine.Light", relayed?.componentType ?? "(null)");
 Check("relay keeps the prefab guid", relayed?.prefabGuid == "ffffffffffffffffffffffffffffffff");
 
+// remove_component takes the same path; the server must not drop the component type on the echo.
+
+var removeComponentOpId = Guid.NewGuid().ToString("N");
+await guest.SendAsync(new WireMessage
+{
+    type = MessageTypes.Op,
+    protocolVersion = ProtocolVersion.Current,
+    opId = removeComponentOpId,
+    opKind = OpKinds.RemoveComponent,
+    nodeId = nodeId,
+    oldValue = "UnityEngine.Light",
+    newValue = "",
+    componentType = "UnityEngine.Light",
+    revision = guest.Revision,
+});
+
+var removeComponentAck = await guest.NextAsync(m => m.type == MessageTypes.Ack && m.opId == removeComponentOpId);
+Check("remove_component from the lock holder is accepted", removeComponentAck is { accepted: true },
+    "code=" + (removeComponentAck?.code ?? "(none)") + (removeComponentAck?.message == null ? "" : " " + removeComponentAck.message));
+
+var relayedRemove = await host.NextAsync(m => m.type == MessageTypes.Op && m.opId == removeComponentOpId);
+Check("relay keeps the removed component type",
+    relayedRemove?.componentType == "UnityEngine.Light", relayedRemove?.componentType ?? "(null)");
+Check("relay keeps the removed install as structural",
+    relayedRemove != null && OpKinds.IsStructural(relayedRemove.opKind), relayedRemove?.opKind ?? "(null)");
+
 // The same node is off limits to everyone else while the guest holds the lock.
 
 var blockedOpId = Guid.NewGuid().ToString("N");

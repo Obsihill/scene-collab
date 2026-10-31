@@ -275,6 +275,225 @@ namespace SceneCollab.Editor.Tests
             Assert.AreEqual(1, applier.Overwritten, "a silent overwrite must be visible in the UI");
         }
 
+        // ── components: add / remove (v0.4) ───────────────────────────────────
+
+        [Test]
+        public void AddingAComponentIsCapturedAsAnOp()
+        {
+            var cube = SaveSceneWithCube("CompAdd", out _);
+            var registry = new SceneNodeRegistry();
+            var nodeId = registry.EnsureNodeId(cube);
+            var structure = new SceneStructure(registry);
+
+            structure.Baseline(cube, nodeId);
+            Assert.AreEqual(0, structure.CollectComponentChanges(cube, nodeId).Count, "baseline must not emit");
+
+            cube.AddComponent<AudioSource>();
+
+            var operations = structure.CollectComponentChanges(cube, nodeId);
+            Assert.AreEqual(1, operations.Count, "one component added, one op");
+            Assert.AreEqual(OpKinds.AddComponent, operations[0].Kind);
+            Assert.AreEqual(typeof(AudioSource).FullName, operations[0].ComponentType);
+
+            Assert.AreEqual(0, structure.CollectComponentChanges(cube, nodeId).Count, "a collected change must not repeat");
+        }
+
+        [Test]
+        public void RemovingAComponentIsCapturedAsAnOp()
+        {
+            var cube = SaveSceneWithCube("CompRemove", out _);
+            cube.AddComponent<AudioSource>();
+
+            var registry = new SceneNodeRegistry();
+            var nodeId = registry.EnsureNodeId(cube);
+            var structure = new SceneStructure(registry);
+
+            structure.Baseline(cube, nodeId);
+            Object.DestroyImmediate(cube.GetComponent<AudioSource>());
+
+            var operations = structure.CollectComponentChanges(cube, nodeId);
+            Assert.AreEqual(1, operations.Count, "one component removed, one op");
+            Assert.AreEqual(OpKinds.RemoveComponent, operations[0].Kind);
+            Assert.AreEqual(typeof(AudioSource).FullName, operations[0].ComponentType);
+            Assert.AreEqual(typeof(AudioSource).FullName, operations[0].OldValue);
+        }
+
+        [Test]
+        public void TransformIsNeverReportedAsRemoved()
+        {
+            var cube = SaveSceneWithCube("CompTransform", out _);
+            var registry = new SceneNodeRegistry();
+            var nodeId = registry.EnsureNodeId(cube);
+            var structure = new SceneStructure(registry);
+            structure.Baseline(cube, nodeId);
+
+            var operations = structure.CollectComponentChanges(cube, nodeId);
+            Assert.AreEqual(0, operations.Count);
+        }
+
+        [Test]
+        public void RemovingAComponentOnTheReceivingEditorDestroysIt()
+        {
+            var cube = SaveSceneWithCube("CompApply", out _);
+            cube.AddComponent<AudioSource>();
+
+            var registry = new SceneNodeRegistry();
+            var nodeId = registry.EnsureNodeId(cube);
+            var diff = new SceneDiff();
+            var applier = new SceneOpApplier(registry, diff, new SceneStructure(registry));
+            diff.Baseline(cube, nodeId);
+
+            var wire = new SceneCollab.Contracts.Protocol.WireMessage
+            {
+                type = SceneCollab.Contracts.Protocol.MessageTypes.Op,
+                opKind = OpKinds.RemoveComponent,
+                nodeId = nodeId,
+                componentType = typeof(AudioSource).FullName,
+                oldValue = typeof(AudioSource).FullName,
+                newValue = "",
+            };
+
+            string note;
+            Assert.IsTrue(applier.Apply(wire, out note), note);
+            Assert.IsNull(cube.GetComponent<AudioSource>(), "the component survived a remove_component");
+            Assert.AreEqual(1, applier.Applied);
+        }
+
+        [Test]
+        public void RemovingAComponentTwiceIsAppliedNotFailed()
+        {
+            var cube = SaveSceneWithCube("CompReplay", out _);
+            var registry = new SceneNodeRegistry();
+            var nodeId = registry.EnsureNodeId(cube);
+            var applier = new SceneOpApplier(registry, new SceneDiff(), new SceneStructure(registry));
+
+            var wire = new SceneCollab.Contracts.Protocol.WireMessage
+            {
+                type = SceneCollab.Contracts.Protocol.MessageTypes.Op,
+                opKind = OpKinds.RemoveComponent,
+                nodeId = nodeId,
+                componentType = typeof(AudioSource).FullName,
+                oldValue = typeof(AudioSource).FullName,
+                newValue = "",
+            };
+
+            string note;
+            Assert.IsTrue(applier.Apply(wire, out note), "a replay after reconnect must not fail: " + note);
+            Assert.AreEqual(1, applier.Applied);
+            Assert.AreEqual(0, applier.Ignored);
+        }
+
+        [Test]
+        public void AddingAMissingScriptLeavesALabelledStandIn()
+        {
+            var cube = SaveSceneWithCube("CompMissing", out _);
+            var registry = new SceneNodeRegistry();
+            var nodeId = registry.EnsureNodeId(cube);
+            var applier = new SceneOpApplier(registry, new SceneDiff(), new SceneStructure(registry));
+
+            var wire = new SceneCollab.Contracts.Protocol.WireMessage
+            {
+                type = SceneCollab.Contracts.Protocol.MessageTypes.Op,
+                opKind = OpKinds.AddComponent,
+                nodeId = nodeId,
+                propertyPath = "component",
+                componentType = "Some.Package.That.IsNot.Installed",
+                oldValue = "",
+                newValue = "Some.Package.That.IsNot.Installed",
+            };
+
+            string note;
+            Assert.IsTrue(applier.Apply(wire, out note), note);
+            Assert.AreEqual(1, applier.MissingScripts);
+
+            var markers = cube.GetComponentsInChildren<CollabMissingMarker>(true);
+            Assert.AreEqual(1, markers.Length, "no stand-in was attached for the absent script");
+            StringAssert.Contains("Some.Package.That.IsNot.Installed", markers[0].label);
+        }
+
+        // ── prefab overrides (v0.4) ───────────────────────────────────────────
+
+        [Test]
+        public void PrefabOverrideIsRecordedInTheInstanceModificationList()
+        {
+            var cube = SaveSceneWithCube("PrefabOverride", out _);
+
+            // A prefab asset built from this object, then re-instantiated so the test owns a real
+            // prefab instance: RecordPrefabInstancePropertyModifications does nothing on a plain object.
+            var prefabPath = TempFolder + "/PrefabOverride_" + _savedScenes + ".prefab";
+            var prefab = PrefabUtility.SaveAsPrefabAsset(cube, prefabPath);
+            _createdAssets.Add(prefabPath);
+            Assert.IsNotNull(prefab);
+
+            var instance = (GameObject)PrefabUtility.InstantiatePrefab(prefab, _scene);
+            instance.name = "Override Instance";
+
+            var registry = new SceneNodeRegistry();
+            var nodeId = registry.EnsureNodeId(instance);
+            var diff = new SceneDiff();
+            var applier = new SceneOpApplier(registry, diff, new SceneStructure(registry));
+            diff.Baseline(instance, nodeId);
+
+            var wire = new SceneCollab.Contracts.Protocol.WireMessage
+            {
+                type = SceneCollab.Contracts.Protocol.MessageTypes.Op,
+                opKind = OpKinds.SetPrefabOverride,
+                nodeId = nodeId,
+                propertyPath = ScenePropertyAccess.LocalPosition,
+                oldValue = "0,0,0",
+                newValue = "7,8,9",
+            };
+
+            string note;
+            Assert.IsTrue(applier.Apply(wire, out note), note);
+            Assert.AreEqual(1, applier.OverridesRecorded);
+            Assert.AreEqual("7,8,9", ScenePropertyAccess.TryRead(instance, ScenePropertyAccess.LocalPosition, out var read) ? read : null);
+
+            var modifications = PrefabUtility.GetPropertyModifications(instance);
+            if (modifications == null || modifications.Length == 0)
+            {
+                modifications = PrefabUtility.GetPropertyModifications(instance.transform);
+            }
+            var found = false;
+            if (modifications != null)
+            {
+                for (var i = 0; i < modifications.Length; i++)
+                {
+                    if (modifications[i].propertyPath != null && modifications[i].propertyPath.StartsWith(ScenePropertyAccess.LocalPosition, System.StringComparison.Ordinal))
+                    {
+                        found = true;
+                        break;
+                    }
+                }
+            }
+
+            Assert.IsTrue(found, "the override never reached the instance modification list");
+        }
+
+        [Test]
+        public void PrefabOverrideOnAPlainObjectIsRefusedNotApplied()
+        {
+            var cube = SaveSceneWithCube("PrefabPlain", out _);
+            var registry = new SceneNodeRegistry();
+            var nodeId = registry.EnsureNodeId(cube);
+            var applier = new SceneOpApplier(registry, new SceneDiff(), new SceneStructure(registry));
+
+            var wire = new SceneCollab.Contracts.Protocol.WireMessage
+            {
+                type = SceneCollab.Contracts.Protocol.MessageTypes.Op,
+                opKind = OpKinds.SetPrefabOverride,
+                nodeId = nodeId,
+                propertyPath = ScenePropertyAccess.LocalPosition,
+                oldValue = "0,0,0",
+                newValue = "1,1,1",
+            };
+
+            string note;
+            Assert.IsFalse(applier.Apply(wire, out note));
+            Assert.AreEqual(1, applier.Ignored);
+            Assert.AreEqual(new Vector3(0f, 0f, 0f), cube.transform.localPosition);
+        }
+
         // ── save guard ────────────────────────────────────────────────────────
 
         [Test]

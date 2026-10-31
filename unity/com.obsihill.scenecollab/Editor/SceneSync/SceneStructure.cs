@@ -43,6 +43,7 @@ namespace SceneCollab.Editor.SceneSync
         readonly SceneNodeRegistry _registry;
         readonly Dictionary<string, string> _parentByNode = new Dictionary<string, string>(StringComparer.Ordinal);
         readonly Dictionary<string, int> _indexByNode = new Dictionary<string, int>(StringComparer.Ordinal);
+        readonly Dictionary<string, string> _componentsByNode = new Dictionary<string, string>(StringComparer.Ordinal);
 
         public SceneStructure(SceneNodeRegistry registry)
         {
@@ -69,6 +70,7 @@ namespace SceneCollab.Editor.SceneSync
             string parentNodeId;
             _parentByNode[nodeId] = TryGetParentNodeId(gameObject, out parentNodeId) ? parentNodeId : null;
             _indexByNode[nodeId] = gameObject.transform.GetSiblingIndex();
+            _componentsByNode[nodeId] = ComponentSignature(gameObject);
         }
 
         public void Forget(string nodeId)
@@ -80,12 +82,14 @@ namespace SceneCollab.Editor.SceneSync
 
             _parentByNode.Remove(nodeId);
             _indexByNode.Remove(nodeId);
+            _componentsByNode.Remove(nodeId);
         }
 
         public void Clear()
         {
             _parentByNode.Clear();
             _indexByNode.Clear();
+            _componentsByNode.Clear();
         }
 
         public int Tracked
@@ -168,6 +172,135 @@ namespace SceneCollab.Editor.SceneSync
             operation.PrefabGuid = prefabGuid ?? "";
             created = true;
             return operation;
+        }
+
+        /// <summary>
+        /// Sorted, duplicate-preserving list of the component type names on an object.
+        ///
+        /// Adding or removing a component fires no property modification and no hierarchy change, so
+        /// neither the property diff nor the hierarchy sweep can see it. Comparing this signature on
+        /// every structural sweep is the cheap way to notice. Duplicates are kept: Unity allows two
+        /// colliders on one object, and a set would report that second collider as no change at all.
+        /// </summary>
+        public static string ComponentSignature(GameObject gameObject)
+        {
+            if (gameObject == null)
+            {
+                return string.Empty;
+            }
+
+            var components = gameObject.GetComponents<Component>();
+            var names = new List<string>(components.Length);
+            for (var i = 0; i < components.Length; i++)
+            {
+                var component = components[i];
+                // A component whose script is missing comes back null; it is still a real entry in the
+                // scene, and pretending it is absent would emit a duplicate add every sweep.
+                names.Add(component == null ? "<missing>" : component.GetType().FullName);
+            }
+
+            names.Sort(StringComparer.Ordinal);
+            return string.Join("|", names.ToArray());
+        }
+
+        /// <summary>
+        /// Component ops since the last <see cref="Baseline"/> for this node: additions and removals.
+        /// Transform is never reported — Unity does not allow removing it, and every object has one.
+        /// </summary>
+        public List<SceneOperation> CollectComponentChanges(GameObject gameObject, string nodeId)
+        {
+            var operations = new List<SceneOperation>();
+            if (gameObject == null || string.IsNullOrEmpty(nodeId))
+            {
+                return operations;
+            }
+
+            var current = ComponentSignature(gameObject);
+
+            string previous;
+            if (!_componentsByNode.TryGetValue(nodeId, out previous))
+            {
+                _componentsByNode[nodeId] = current;
+                return operations;
+            }
+
+            if (string.Equals(previous, current, StringComparison.Ordinal))
+            {
+                return operations;
+            }
+
+            var before = CountSignature(previous);
+            var after = CountSignature(current);
+
+            foreach (var pair in before)
+            {
+                if (pair.Key == typeof(Transform).FullName)
+                {
+                    continue;
+                }
+
+                int removed;
+                after.TryGetValue(pair.Key, out removed);
+                var surplus = pair.Value - removed;
+                for (var i = 0; i < surplus; i++)
+                {
+                    SceneOperation operation;
+                    string error;
+                    if (!SceneOperation.TryCreate(OpKinds.RemoveComponent, nodeId, "", pair.Key, "", out operation, out error))
+                    {
+                        continue;
+                    }
+
+                    operation.ComponentType = pair.Key;
+                    operations.Add(operation);
+                }
+            }
+
+            foreach (var pair in after)
+            {
+                if (pair.Key == typeof(Transform).FullName || pair.Key == "<missing>")
+                {
+                    continue;
+                }
+
+                int existed;
+                before.TryGetValue(pair.Key, out existed);
+                var surplus = pair.Value - existed;
+                for (var i = 0; i < surplus; i++)
+                {
+                    SceneOperation operation;
+                    string error;
+                    if (!SceneOperation.TryCreate(OpKinds.AddComponent, nodeId, "component", "", pair.Key, out operation, out error))
+                    {
+                        continue;
+                    }
+
+                    operation.ComponentType = pair.Key;
+                    operations.Add(operation);
+                }
+            }
+
+            _componentsByNode[nodeId] = current;
+            return operations;
+        }
+
+        static Dictionary<string, int> CountSignature(string signature)
+        {
+            var counts = new Dictionary<string, int>(StringComparer.Ordinal);
+            if (string.IsNullOrEmpty(signature))
+            {
+                return counts;
+            }
+
+            var parts = signature.Split(new[] { '|' }, StringSplitOptions.RemoveEmptyEntries);
+            for (var i = 0; i < parts.Length; i++)
+            {
+                int seen;
+                counts.TryGetValue(parts[i], out seen);
+                counts[parts[i]] = seen + 1;
+            }
+
+            return counts;
         }
 
         public SceneOperation BuildRemove(string nodeId, string name)

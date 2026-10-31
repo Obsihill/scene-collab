@@ -54,6 +54,24 @@ explicit instead:
 Structural ops stayed in this release because they were the one thing that made "several people
 editing a scene" feel false: you could move a cube together but not add one.
 
+## 3-2. Components are watched by signature (v0.4)
+
+A component added or deleted in the inspector fires neither a property modification nor a hierarchy
+change. `SceneStructure` therefore keeps a per-object signature — the sorted list of component type
+names — and compares it on every structural sweep. The signature is a string and keeps duplicates,
+because Unity allows two colliders on one object and a set would report the second one as no change.
+
+Deleting a remote component goes through `DestroyImmediate`, not `Destroy`: in a batch-mode editor
+there is no frame after this one, so a deferred destroy never happens. Deleting a component that is
+already gone counts as applied — a replay after a reconnect is normal, not an error.
+
+Writing a property on a prefab instance is not enough to make it an override. Unity records
+`m_Modifications` only along the paths it watches, so a value written straight through
+`SerializedProperty` can sit on the instance and be dropped by the next save. The receiving editor
+therefore calls `PrefabUtility.RecordPrefabInstancePropertyModifications` after the write. Two editors
+can still record the array in different orders; normalising that order is deliberately left out, since
+Unity rewrites the array on save anyway.
+
 ## 4. Stable ids
 
 `GlobalObjectId` (scene GUID + fileID + prefab context) is hashed with FNV-1a into a 16-char

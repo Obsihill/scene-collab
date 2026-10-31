@@ -81,7 +81,7 @@ Structural ops are **host-only** (`not_host`) and require the sender to hold the
 | `remove_node` | delete | yes |
 | `reparent` | change parent | yes |
 | `reorder_children` | change sibling order | yes |
-| `add_component` | add a component | yes |
+| `add_component`, `remove_component` | add a component | yes |
 | `set_property` | scalar/vector property | no (last-write-wins) |
 | `set_prefab_override` | prefab instance modification | no |
 

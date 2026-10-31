@@ -205,13 +205,58 @@ namespace SceneCollab.Editor.Tests
                     + position.x + "," + position.y + "," + position.z + "\",\"revision\":" + _session.Revision
                     + ",\"applied\":" + _sync.Applied + ",\"nodeIdBound\":" + (bound ? "true" : "false") + "}");
 
-                Debug.Log("[v03] guest object present at " + position + "; waiting for its removal");
-                _stage = 2;
+                Debug.Log("[v03] guest object present at " + position + "; waiting for a component");
+                _stage = 3;
                 _deadline = EditorApplication.timeSinceStartup + 90.0;
                 return;
             }
 
-            if (_stage == 2)
+            // Stage 3/4: the guest adds and then removes a component. Neither fires a property
+            // modification or a hierarchy change, so if the component signature sweep is broken the
+            // host simply sits here until the deadline.
+            if (_stage == 3)
+            {
+                var target = FindByName("Guest Cube");
+                if (target == null)
+                {
+                    return;
+                }
+
+                if (target.GetComponent<AudioSource>() == null)
+                {
+                    return;
+                }
+
+                WriteJson("v03-host-comp.json", "{\"component\":\"AudioSource\",\"applied\":" + _sync.Applied
+                    + ",\"note\":\"" + (_sync.LastNote ?? "") + "\"}");
+                Debug.Log("[v03] guest component arrived: " + _sync.LastNote);
+                _stage = 4;
+                _deadline = EditorApplication.timeSinceStartup + 90.0;
+                return;
+            }
+
+            if (_stage == 4)
+            {
+                var target = FindByName("Guest Cube");
+                if (target == null)
+                {
+                    return;
+                }
+
+                if (target.GetComponent<AudioSource>() != null)
+                {
+                    return;
+                }
+
+                WriteJson("v03-host-comp-removed.json", "{\"component\":\"AudioSource\",\"removed\":true,\"applied\":"
+                    + _sync.Applied + ",\"note\":\"" + (_sync.LastNote ?? "") + "\"}");
+                Debug.Log("[v03] guest component removed: " + _sync.LastNote);
+                _stage = 5;
+                _deadline = EditorApplication.timeSinceStartup + 90.0;
+                return;
+            }
+
+            if (_stage == 5)
             {
                 if (FindByName("Guest Cube") != null)
                 {
@@ -223,7 +268,7 @@ namespace SceneCollab.Editor.Tests
                 WriteJson("v03-host-result.json", "{\"ok\":true,\"applied\":" + _sync.Applied
                     + ",\"structureSent\":" + _sync.StructureSent + ",\"locksSkipped\":" + _sync.LocksSkipped
                     + ",\"rejected\":" + _sync.Rejected + ",\"assetNote\":\"" + (_sync.AssetNote ?? "") + "\"}");
-                Debug.Log("[v03] PASS: guest object created, moved and removed");
+                Debug.Log("[v03] PASS: guest object created, moved, given a component, stripped of it and removed");
                 Finish(0);
             }
         }
@@ -306,7 +351,8 @@ namespace SceneCollab.Editor.Tests
         {
             string[] stale =
             {
-                "v03-host.json", "v03-host-saw.json", "v03-host-removed.json", "v03-host-result.json",
+                "v03-host.json", "v03-host-saw.json", "v03-host-comp.json", "v03-host-comp-removed.json",
+                "v03-host-removed.json", "v03-host-result.json",
                 "v03-host-failure.json", "v03-guest-added.json", "v03-guest-result.json",
             };
 

@@ -392,6 +392,15 @@ namespace SceneCollab.Editor.SceneSync
                     StructureSent++;
                     LastNote = "moved " + gameObject.name;
                 }
+
+                var componentOps = _structure.CollectComponentChanges(gameObject, nodeId);
+                for (var c = 0; c < componentOps.Count; c++)
+                {
+                    _outbox.Enqueue(componentOps[c]);
+                    StructureSent++;
+                    LastNote = componentOps[c].Kind + " " + componentOps[c].ComponentType
+                        + " on " + gameObject.name;
+                }
             }
         }
 

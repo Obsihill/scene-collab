@@ -53,13 +53,14 @@ namespace SceneCollab.Contracts.Protocol
         public const string Reparent = "reparent";
         public const string ReorderChildren = "reorder_children";
         public const string AddComponent = "add_component";
+        public const string RemoveComponent = "remove_component";
         public const string SetProperty = "set_property";
         public const string SetPrefabOverride = "set_prefab_override";
 
         public static bool IsStructural(string kind)
         {
             return kind == AddNode || kind == RemoveNode || kind == Reparent || kind == ReorderChildren
-                || kind == AddComponent;
+                || kind == AddComponent || kind == RemoveComponent;
         }
     }
 }

@@ -62,6 +62,12 @@ namespace SceneCollab.Editor.SceneSync
         /// <summary>Ops applied on top of a value the local editor had already changed differently.</summary>
         public int Overwritten { get; private set; }
 
+        /// <summary>Component adds whose script does not exist here; a labelled stand-in was attached.</summary>
+        public int MissingScripts { get; private set; }
+
+        /// <summary>Prefab overrides written and pinned into the instance's modification list.</summary>
+        public int OverridesRecorded { get; private set; }
+
         /// <summary>Objects this applier created, so the caller can leave them out of its own diff.</summary>
         public IList<GameObject> Touched
         {
@@ -98,10 +104,11 @@ namespace SceneCollab.Editor.SceneSync
                 case OpKinds.AddComponent:
                     return ApplyAddComponent(op, out note);
 
+                case OpKinds.RemoveComponent:
+                    return ApplyRemoveComponent(op, out note);
+
                 case OpKinds.SetPrefabOverride:
-                    Ignored++;
-                    note = "prefab override needs the prefab instance (v0.4)";
-                    return false;
+                    return ApplyPrefabOverride(op, out note);
 
                 default:
                     Ignored++;
@@ -394,11 +401,21 @@ namespace SceneCollab.Editor.SceneSync
             var type = SceneComponentFields.ResolveType(typeName);
             if (type == null)
             {
-                // The type simply is not in this project: that is the missing-script case, and it is
-                // reported by the asset health layer rather than faked here.
-                Ignored++;
-                note = "component type not found: " + typeName;
-                return false;
+                // The script does not exist on this machine. Unity's own "Missing Script" is an empty
+                // slot that cannot be inspected, so a labelled stand-in is attached instead: it names
+                // the missing type in the hierarchy and disappears when the script arrives.
+                var stub = CollabPlaceholders.Attach(gameObject, "missing script: " + typeName);
+                if (stub == null)
+                {
+                    Ignored++;
+                    note = "component type not found: " + typeName;
+                    return false;
+                }
+
+                MissingScripts++;
+                Applied++;
+                note = "missing script stub for " + typeName;
+                return true;
             }
 
             if (gameObject.GetComponent(type) != null)
@@ -412,6 +429,112 @@ namespace SceneCollab.Editor.SceneSync
             _diff.Baseline(gameObject, op.nodeId);
             MarkDirty(gameObject.scene);
             Applied++;
+            return true;
+        }
+
+        bool ApplyRemoveComponent(WireMessage op, out string note)
+        {
+            note = null;
+
+            GameObject gameObject;
+            if (!_registry.TryResolve(op.nodeId, out gameObject) || gameObject == null)
+            {
+                Ignored++;
+                note = "unknown node: " + op.nodeId;
+                return false;
+            }
+
+            var typeName = !string.IsNullOrEmpty(op.componentType)
+                ? op.componentType
+                : (!string.IsNullOrEmpty(op.oldValue) ? op.oldValue : op.newValue);
+
+            if (string.IsNullOrEmpty(typeName))
+            {
+                Ignored++;
+                note = "remove_component without a component type";
+                return false;
+            }
+
+            var type = SceneComponentFields.ResolveType(typeName);
+            if (type == null)
+            {
+                // The script was never here, so the only thing to remove is its stand-in.
+                var cleared = CollabPlaceholders.Clear(gameObject);
+                if (cleared > 0)
+                {
+                    Applied++;
+                    note = "removed placeholder for " + typeName;
+                    return true;
+                }
+
+                Ignored++;
+                note = "component type not found: " + typeName;
+                return false;
+            }
+
+            if (type == typeof(Transform))
+            {
+                Ignored++;
+                note = "transform cannot be removed";
+                return false;
+            }
+
+            var component = gameObject.GetComponent(type);
+            if (component == null)
+            {
+                // Already gone: a replay after a reconnect must not fail the session.
+                Applied++;
+                note = "component already removed";
+                return true;
+            }
+
+            // DestroyImmediate, not Destroy: this runs in edit mode, outside play mode, where Destroy
+            // is deferred to the end of a frame that never comes in batch mode.
+            UnityEngine.Object.DestroyImmediate(component);
+            _structure.Baseline(gameObject, op.nodeId);
+            _diff.Baseline(gameObject, op.nodeId);
+            MarkDirty(gameObject.scene);
+            Applied++;
+            note = "removed " + typeName + " from " + gameObject.name;
+            return true;
+        }
+
+        /// <summary>
+        /// A property edit on a prefab instance.
+        ///
+        /// Writing the value is not enough. Unity records an instance override in the modification list
+        /// only along the paths it watches, so a value written straight through SerializedProperty can
+        /// land on the instance and still be dropped at save time. Recording the modification
+        /// explicitly pins it on the receiving side.
+        /// </summary>
+        bool ApplyPrefabOverride(WireMessage op, out string note)
+        {
+            note = null;
+
+            GameObject gameObject;
+            if (!_registry.TryResolve(op.nodeId, out gameObject) || gameObject == null)
+            {
+                Ignored++;
+                note = "unknown node: " + op.nodeId;
+                return false;
+            }
+
+            var instanceRoot = PrefabUtility.GetNearestPrefabInstanceRoot(gameObject);
+            if (instanceRoot == null)
+            {
+                Ignored++;
+                note = "not a prefab instance: " + gameObject.name;
+                return false;
+            }
+
+            if (!ApplyProperty(op, out note))
+            {
+                return false;
+            }
+
+            PrefabUtility.RecordPrefabInstancePropertyModifications(gameObject);
+            OverridesRecorded++;
+            note = "override recorded on " + instanceRoot.name;
             return true;
         }
 

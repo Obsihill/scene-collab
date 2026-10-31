@@ -110,6 +110,57 @@ internal static class GuestFlow
         var sawCube = await WaitForFile(Path.Combine(dir, "v03-host-saw.json"), 90);
         Check("unity applied the new object", sawCube, "v03-host-saw.json " + (sawCube ? "written" : "missing"));
 
+        // Component add/remove. A guest could not touch components at all in v0.3: the asset manifest
+        // only says which assets are needed, and nothing watched a component list for changes. The host
+        // notices these through the component signature sweep, so this round also tests that sweep.
+        const string ComponentType = "UnityEngine.AudioSource";
+
+        var addComponentId = Guid.NewGuid().ToString("N");
+        await peer.SendAsync(new WireMessage
+        {
+            type = MessageTypes.Op,
+            protocolVersion = ProtocolVersion.Current,
+            opId = addComponentId,
+            opKind = OpKinds.AddComponent,
+            nodeId = nodeId,
+            propertyPath = "component",
+            oldValue = "",
+            newValue = ComponentType,
+            componentType = ComponentType,
+            revision = peer.Revision,
+        });
+
+        var addComponentAck = await peer.NextAsync(m => m.type == MessageTypes.Ack && m.opId == addComponentId);
+        Check("server accepted add_component", addComponentAck is { accepted: true },
+            "code=" + (addComponentAck?.code ?? "(none)"));
+
+        var sawComponent = await WaitForFile(Path.Combine(dir, "v03-host-comp.json"), 90);
+        Check("unity added the component", sawComponent,
+            "v03-host-comp.json " + (sawComponent ? "written" : "missing"));
+
+        var removeComponentId = Guid.NewGuid().ToString("N");
+        await peer.SendAsync(new WireMessage
+        {
+            type = MessageTypes.Op,
+            protocolVersion = ProtocolVersion.Current,
+            opId = removeComponentId,
+            opKind = OpKinds.RemoveComponent,
+            nodeId = nodeId,
+            propertyPath = "",
+            oldValue = ComponentType,
+            newValue = "",
+            componentType = ComponentType,
+            revision = peer.Revision,
+        });
+
+        var removeComponentAck = await peer.NextAsync(m => m.type == MessageTypes.Ack && m.opId == removeComponentId);
+        Check("server accepted remove_component", removeComponentAck is { accepted: true },
+            "code=" + (removeComponentAck?.code ?? "(none)"));
+
+        var sawComponentGone = await WaitForFile(Path.Combine(dir, "v03-host-comp-removed.json"), 90);
+        Check("unity removed the component", sawComponentGone,
+            "v03-host-comp-removed.json " + (sawComponentGone ? "written" : "missing"));
+
         var removeId = Guid.NewGuid().ToString("N");
         await peer.SendAsync(new WireMessage
         {
