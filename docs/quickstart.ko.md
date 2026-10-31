@@ -25,10 +25,13 @@ curl http://localhost:8080/health
 
 `{"status":"ok", ...}` 가 나오면 서버는 끝입니다.
 
-> 검증 상태: `ghcr.io/obsihill/scene-collab` 이미지를 직접 받아 `/health`·스모크·양방향 편집
-> 전파까지 실측했습니다. 다만 `docker compose up -d` 경로 자체는 이 저장소에서 아직 자동
-> 검증하지 않습니다(compose는 같은 이미지에 환경변수·포트·헬스체크만 얹습니다). 문제가 생기면
-> `docker compose logs -f`로 먼저 확인하세요.
+> 검증 상태: `docker compose up -d` 경로를 실측했습니다. 컨테이너 `healthy`, 호스트 포트의
+> `/health` 응답, 프로토콜 프로브 26체크 PASS까지 확인했습니다. 이미지는 여전히 직접 받아
+> `/health`·양방향 편집 전파도 검증했습니다. 문제가 생기면 `docker compose logs -f`로 먼저
+> 확인하세요.
+>
+> `.env`의 `SCENECOLLAB_PORT`는 **호스트 포트**입니다. 컨테이너 안쪽 포트는 8080으로
+> 고정되므로(`docker-compose.yml`), 포트를 바꿔도 이 값만 수정하면 됩니다.
 
 > **토큰이 없으면 서버는 일부러 실행되지 않습니다.** 인증 없는 씬 서버가 인터넷에 열리면
 > 씬 전체가 유출되는 사고가 되기 때문에, 안전하지 않은 경로는 `--insecure-dev`를 직접
