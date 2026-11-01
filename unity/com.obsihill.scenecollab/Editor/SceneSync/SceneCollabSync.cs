@@ -48,6 +48,9 @@ namespace SceneCollab.Editor.SceneSync
         {
             _structure = new SceneStructure(_registry);
             _applier = new SceneOpApplier(_registry, _diff, _structure);
+
+            // Reference fields travel as node ids, so the diff needs the registry that mints them.
+            _diff.Registry = _registry;
             _feed.UndoRedoPerformed += OnUndoRedo;
             SnapshotDeletesExtras = true;
         }
@@ -69,6 +72,21 @@ namespace SceneCollab.Editor.SceneSync
         public int Overwritten
         {
             get { return _applier.Overwritten; }
+        }
+
+        /// <summary>
+        /// References a peer sent that this machine could not resolve — a material, prefab or scene
+        /// object it does not have. Shown in the window because each one is an ERROR box in the scene.
+        /// </summary>
+        public int MissingReferences
+        {
+            get { return _applier.MissingReferences; }
+        }
+
+        /// <summary>Values the codec could not express; each one is a field this editor silently lacks.</summary>
+        public int UnsupportedValues
+        {
+            get { return _applier.UnsupportedValues; }
         }
 
         public int Rejected { get; private set; }
@@ -463,12 +481,31 @@ namespace SceneCollab.Editor.SceneSync
                 }
 
                 var componentOps = _structure.CollectComponentChanges(gameObject, nodeId);
+                var addedComponents = false;
                 for (var c = 0; c < componentOps.Count; c++)
                 {
                     _outbox.Enqueue(componentOps[c]);
                     StructureSent++;
                     LastNote = componentOps[c].Kind + " " + componentOps[c].ComponentType
                         + " on " + gameObject.name;
+
+                    if (componentOps[c].Kind == OpKinds.AddComponent)
+                    {
+                        addedComponents = true;
+                    }
+                }
+
+                if (addedComponents)
+                {
+                    // The peer just built the component with its type defaults. Everything the sender
+                    // holds for this object follows as explicit values, in the same breath as the add —
+                    // waiting for the next diff would let the peer adopt the defaults as baseline and
+                    // never receive the real ones.
+                    var values = _diff.CollectAll(gameObject, nodeId);
+                    for (var v = 0; v < values.Count; v++)
+                    {
+                        _outbox.Enqueue(values[v]);
+                    }
                 }
             }
         }

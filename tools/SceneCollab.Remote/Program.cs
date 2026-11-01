@@ -51,6 +51,13 @@ if (!string.IsNullOrEmpty(token))
 var connectionUrl = url + (url.Contains('?') ? "&" : "?") + "room=" + Uri.EscapeDataString(room);
 await socket.ConnectAsync(new Uri(connectionUrl), timeout.Token);
 
+// The socket must be read continuously, even while this peer is waiting for a file to appear.
+// A peer that parks its receive call for a minute is killed by the server's silence timeout --
+// exactly the failure the Unity editor used to hit while it loaded a project.
+var inbound = System.Threading.Channels.Channel.CreateUnbounded<WireMessage>();
+var sendGate = new SemaphoreSlim(1, 1);
+_ = Task.Run(ReadLoopAsync);
+
 await SendAsync(new WireMessage
 {
     type = MessageTypes.Hello,
@@ -67,7 +74,7 @@ File.WriteAllText(Path.Combine(dir, "peer-ready.json"),
 
 // Wait for the Unity editor to say which node this run is about.
 var readyPath = Path.Combine(dir, "unity-ready.json");
-var deadline = DateTime.UtcNow.AddSeconds(90);
+var deadline = DateTime.UtcNow.AddSeconds(120);
 while (!File.Exists(readyPath))
 {
     if (DateTime.UtcNow > deadline)
@@ -196,7 +203,48 @@ async Task AnswerPingAsync(WireMessage message)
 async Task SendAsync(WireMessage message)
 {
     var json = JsonSerializer.Serialize(message, WireJson.Options);
-    await socket.SendAsync(Encoding.UTF8.GetBytes(json), WebSocketMessageType.Text, true, timeout.Token);
+    await sendGate.WaitAsync(timeout.Token);
+    try
+    {
+        await socket.SendAsync(Encoding.UTF8.GetBytes(json), WebSocketMessageType.Text, true, timeout.Token);
+    }
+    finally
+    {
+        sendGate.Release();
+    }
+}
+
+// Owns the receive side. Pings are answered here, off the main flow, so waiting for the editor
+// never costs this peer its seat in the room.
+async Task ReadLoopAsync()
+{
+    try
+    {
+        while (true)
+        {
+            var message = await ReceiveRawAsync(timeout.Token);
+            if (message == null)
+            {
+                break;
+            }
+
+            if (message.type == MessageTypes.Ping)
+            {
+                await AnswerPingAsync(message);
+                continue;
+            }
+
+            inbound.Writer.TryWrite(message);
+        }
+    }
+    catch (Exception ex)
+    {
+        Log("read_loop_ended", ("error", ex.Message));
+    }
+    finally
+    {
+        inbound.Writer.TryComplete();
+    }
 }
 
 async Task<WireMessage> ReadUntilAsync(string type)
@@ -229,6 +277,18 @@ async Task<WireMessage> ReadUntilAsync(string type)
 }
 
 async Task<WireMessage?> ReceiveAsync(CancellationToken ct)
+{
+    try
+    {
+        return await inbound.Reader.ReadAsync(ct);
+    }
+    catch (System.Threading.Channels.ChannelClosedException)
+    {
+        return null;
+    }
+}
+
+async Task<WireMessage?> ReceiveRawAsync(CancellationToken ct)
 {
     var buffer = new byte[16 * 1024];
     using var stream = new MemoryStream();

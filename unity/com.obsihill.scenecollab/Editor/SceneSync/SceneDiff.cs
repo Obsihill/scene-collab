@@ -23,6 +23,13 @@ namespace SceneCollab.Editor.SceneSync
 
         readonly List<string> _paths = new List<string>();
 
+        /// <summary>
+        /// The node registry, for reference fields: a reference to another scene object travels as that
+        /// object's node id, and only the registry knows the id. Assigned by the session; null is safe
+        /// (references then read as <c>ref:local</c> and are reported, never silently dropped).
+        /// </summary>
+        public SceneNodeRegistry Registry { get; set; }
+
         public int TrackedNodes
         {
             get { return _snapshot.Count; }
@@ -43,7 +50,7 @@ namespace SceneCollab.Editor.SceneSync
             {
                 var path = _paths[i];
                 string value;
-                if (ScenePropertyAccess.TryRead(gameObject, path, out value))
+                if (ScenePropertyAccess.TryRead(gameObject, path, Registry, out value))
                 {
                     values[path] = value;
                 }
@@ -71,7 +78,7 @@ namespace SceneCollab.Editor.SceneSync
                 var path = _paths[i];
 
                 string current;
-                if (!ScenePropertyAccess.TryRead(gameObject, path, out current))
+                if (!ScenePropertyAccess.TryRead(gameObject, path, Registry, out current))
                 {
                     continue;
                 }
@@ -100,6 +107,50 @@ namespace SceneCollab.Editor.SceneSync
 
                 // Advance the snapshot even when the op was refused: the value is what the object now
                 // holds, and pretending otherwise would resend it forever.
+                values[path] = current;
+            }
+
+            return operations;
+        }
+
+        /// <summary>
+        /// Every tracked field of the object, emitted unconditionally.
+        ///
+        /// Used right after a component was added: the receiver has a fresh component holding its type
+        /// defaults, and the incremental diff would adopt those defaults as its baseline and never send
+        /// the sender's real values. A new component therefore ships its whole field set.
+        /// </summary>
+        public List<SceneOperation> CollectAll(GameObject gameObject, string nodeId)
+        {
+            var operations = new List<SceneOperation>();
+            if (gameObject == null || string.IsNullOrEmpty(nodeId))
+            {
+                return operations;
+            }
+
+            var values = GetOrCreate(nodeId);
+            GatherPaths(gameObject);
+
+            for (var i = 0; i < _paths.Count; i++)
+            {
+                var path = _paths[i];
+                string current;
+                if (!ScenePropertyAccess.TryRead(gameObject, path, Registry, out current))
+                {
+                    continue;
+                }
+
+                string previous;
+                values.TryGetValue(path, out previous);
+
+                SceneOperation operation;
+                string error;
+                if (SceneOperation.TryCreate(KindFor(gameObject), nodeId, path, previous ?? "", current,
+                        out operation, out error))
+                {
+                    operations.Add(operation);
+                }
+
                 values[path] = current;
             }
 

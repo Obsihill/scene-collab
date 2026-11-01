@@ -33,6 +33,9 @@ namespace SceneCollab.Domain
         /// <summary>Component type name for <c>add_component</c>.</summary>
         public string ComponentType;
 
+        /// <summary>Which instance of <see cref="ComponentType"/> the op addresses (0-based slot).</summary>
+        public int ComponentIndex;
+
         /// <summary>
         /// Builds an op, or explains why it cannot be one. Failure here is a caller bug, not
         /// a user error, so the message names the field.
@@ -115,6 +118,7 @@ namespace SceneCollab.Domain
                 siblingIndex = SiblingIndex,
                 prefabGuid = PrefabGuid,
                 componentType = ComponentType,
+                componentIndex = ComponentIndex,
             };
         }
 

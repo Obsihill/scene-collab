@@ -68,6 +68,19 @@ namespace SceneCollab.Editor.SceneSync
         /// <summary>Prefab overrides written and pinned into the instance's modification list.</summary>
         public int OverridesRecorded { get; private set; }
 
+        /// <summary>
+        /// References that arrived pointing at something this machine does not have. Each one leaves an
+        /// ERROR stand-in on the object, so a missing material can never pass for a black one.
+        /// </summary>
+        public int MissingReferences { get; private set; }
+
+        /// <summary>
+        /// Values this editor's codec cannot express — an unsupported type, or text that does not parse.
+        /// Counted separately from <see cref="Ignored"/> because "the field could not be written" is a
+        /// limitation of the tool and has to be visible as one, not buried in an ignore count.
+        /// </summary>
+        public int UnsupportedValues { get; private set; }
+
         /// <summary>Objects this applier created, so the caller can leave them out of its own diff.</summary>
         public IList<GameObject> Touched
         {
@@ -145,12 +158,28 @@ namespace SceneCollab.Editor.SceneSync
                 Overwritten++;
             }
 
-            if (!ScenePropertyAccess.TryWrite(gameObject, op.propertyPath, op.newValue))
+            string problem;
+            if (!ScenePropertyAccess.TryWrite(gameObject, op.propertyPath, _registry, op.newValue, out problem))
             {
                 Ignored++;
-                note = "could not write " + op.propertyPath;
+
+                // A reference that cannot be resolved is the one failure a user must see: an empty
+                // material slot looks like a choice, an ERROR box looks like a bug in someone's checkout.
+                if (SceneReferenceCodec.IsReference(op.newValue))
+                {
+                    MissingReferences++;
+                    CollabPlaceholders.AttachError(gameObject, "missing ref: " + ShortPath(op.propertyPath), op.propertyPath);
+                    note = problem + " (" + ShortPath(op.propertyPath) + ")";
+                    return false;
+                }
+
+                UnsupportedValues++;
+                note = "could not write " + op.propertyPath + ": " + problem;
                 return false;
             }
+
+            // The reference resolved: drop any ERROR stand-in left for this field by an earlier attempt.
+            CollabPlaceholders.ClearError(gameObject, op.propertyPath);
 
             // Advance the snapshot so the change we just made does not look local.
             _diff.NoteRemoteValue(op.nodeId, op.propertyPath, op.newValue);
@@ -158,6 +187,34 @@ namespace SceneCollab.Editor.SceneSync
             MarkDirty(gameObject.scene);
             Applied++;
             return true;
+        }
+
+        /// <summary>
+        /// Puts an object where the sender says it sits among its siblings. A root object has no parent
+        /// transform, so its sibling index is an index into the scene's root list; the previous version
+        /// only moved objects when the index was greater than zero, which silently dropped the most
+        /// common case of all — a new object created at the top of the hierarchy.
+        /// </summary>
+        static void PlaceAmongSiblings(GameObject created, int index)
+        {
+            if (created == null || index < 0)
+            {
+                return;
+            }
+
+            var transform = created.transform;
+            var parent = transform.parent;
+            var count = parent != null ? parent.childCount : created.scene.rootCount;
+            if (count <= 0)
+            {
+                return;
+            }
+
+            var wanted = index > count - 1 ? count - 1 : index;
+            if (transform.GetSiblingIndex() != wanted)
+            {
+                transform.SetSiblingIndex(wanted);
+            }
         }
 
         bool ApplyAddNode(WireMessage op, out string note)
@@ -168,6 +225,9 @@ namespace SceneCollab.Editor.SceneSync
             if (_registry.TryResolve(op.nodeId, out existing) && existing != null)
             {
                 // Already have it: the op is a replay after a reconnect, and rebuilding would duplicate.
+                // Its position is still enforced — a snapshot replayed onto an object that drifted is
+                // exactly how one editor ends up with a different hierarchy than everyone else.
+                PlaceAmongSiblings(existing, op.siblingIndex);
                 Applied++;
                 note = "already present";
                 return true;
@@ -265,17 +325,15 @@ namespace SceneCollab.Editor.SceneSync
 
             // A root object has no parent transform; reading through it threw before this guard, which
             // meant every snapshot (and every live add) of a root-level object failed on the receiver.
-            var parentTransform = created.transform.parent;
-            if (op.siblingIndex > 0 && parentTransform != null && op.siblingIndex < parentTransform.childCount)
-            {
-                created.transform.SetSiblingIndex(op.siblingIndex);
-            }
+            // Roots have an order too — the scene root list — and a hierarchy that reorders itself on
+            // every join is the kind of drift nobody reports but everybody notices.
+            PlaceAmongSiblings(created, op.siblingIndex);
 
             if (prefabMissing)
             {
                 // The stand-in is what the host's object will look like to this editor until the prefab
                 // asset arrives: a labelled placeholder rather than nothing at all.
-                var placeholder = CollabPlaceholders.Attach(created, name + " (missing prefab)");
+                var placeholder = CollabPlaceholders.AttachError(created, name + " (missing prefab)");
                 if (placeholder != null)
                 {
                     _touched.Add(placeholder);
@@ -369,18 +427,16 @@ namespace SceneCollab.Editor.SceneSync
                 return false;
             }
 
+            // Root objects order themselves inside the scene's root list, not inside a parent's
+            // children. Refusing them meant a host that reordered two root objects could never tell the
+            // peer, and the peer's hierarchy silently disagreed from then on.
             var parent = gameObject.transform.parent;
-            if (parent == null)
-            {
-                Ignored++;
-                note = "reorder on a root object";
-                return false;
-            }
+            var siblings = parent != null ? parent.childCount : gameObject.scene.rootCount;
 
-            if (op.siblingIndex < 0 || op.siblingIndex >= parent.childCount)
+            if (op.siblingIndex < 0 || op.siblingIndex >= siblings)
             {
                 Ignored++;
-                note = "sibling index out of range: " + op.siblingIndex;
+                note = "sibling index out of range: " + op.siblingIndex + " of " + siblings;
                 return false;
             }
 
@@ -424,10 +480,14 @@ namespace SceneCollab.Editor.SceneSync
                 return true;
             }
 
-            if (gameObject.GetComponent(type) != null)
+            var slot = op.componentIndex < 0 ? 0 : op.componentIndex;
+
+            // Slot-aware idempotency: a replay must not create a second AudioSource, but a peer that
+            // legitimately has two must still receive the third.
+            if (SceneComponentFields.CountOfType(gameObject, typeName) > slot)
             {
                 Applied++;
-                note = "component already present";
+                note = "component already present (#" + slot + ")";
                 return true;
             }
 
@@ -485,7 +545,20 @@ namespace SceneCollab.Editor.SceneSync
                 return false;
             }
 
-            var component = gameObject.GetComponent(type);
+            var slot = op.componentIndex < 0 ? 0 : op.componentIndex;
+            var component = SceneComponentFields.FindComponent(gameObject, typeName, slot);
+
+            if (component == null)
+            {
+                // A slot that never existed here (a peer removed the instance this machine numbered
+                // differently): fall back to the last instance of the type, then to "already gone".
+                var count = SceneComponentFields.CountOfType(gameObject, typeName);
+                if (count > 0)
+                {
+                    component = SceneComponentFields.FindComponent(gameObject, typeName, count - 1);
+                }
+            }
+
             if (component == null)
             {
                 // Already gone: a replay after a reconnect must not fail the session.
@@ -570,6 +643,16 @@ namespace SceneCollab.Editor.SceneSync
         Scene gameObjectScene()
         {
             return EditorSceneManager.GetActiveScene();
+        }
+
+        static string ShortPath(string path)
+        {
+            if (string.IsNullOrEmpty(path))
+            {
+                return "";
+            }
+
+            return SceneComponentFields.IsComponentPath(path) ? SceneComponentFields.ShortName(path) : path;
         }
 
         static void MarkDirty(Scene scene)

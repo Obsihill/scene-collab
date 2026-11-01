@@ -300,6 +300,39 @@ if (args.Contains("--heartbeat"))
     await mute.DisposeAsync();
 }
 
+// 9. v0.4.7: the component slot and the reference token are relayed verbatim. The server never
+//    interprets an op, but it does re-serialise it — a field the DTO does not know about is dropped
+//    here, and the other editor then writes the wrong AudioSource or restores an empty material.
+var identityId = Guid.NewGuid().ToString("N");
+await host.SendAsync(new WireMessage
+{
+    type = MessageTypes.Op,
+    protocolVersion = ProtocolVersion.Current,
+    opId = identityId,
+    opKind = OpKinds.SetProperty,
+    nodeId = lockedNode,
+    propertyPath = "c/UnityEngine.AudioSource#1/m_Volume",
+    componentType = "UnityEngine.AudioSource",
+    componentIndex = 1,
+    oldValue = "1",
+    newValue = "ref:0123456789abcdef0123456789abcdef:1234",
+    snapshot = false,
+    revision = host.Revision,
+});
+
+var identityAck = await host.NextAsync(m => m.type == MessageTypes.Ack && m.opId == identityId);
+Check("server accepted a slot-addressed reference op", identityAck is { accepted: true },
+    "code=" + (identityAck?.code ?? "(none)") + (identityAck?.message == null ? "" : " " + identityAck.message));
+
+var identityAtGuest = await guest.NextAsync(m => m.type == MessageTypes.Op && m.opId == identityId);
+Check("the component slot survives the relay", identityAtGuest?.componentIndex == 1,
+    "componentIndex=" + (identityAtGuest?.componentIndex.ToString() ?? "(null)"));
+Check("the reference token survives the relay",
+    identityAtGuest?.newValue == "ref:0123456789abcdef0123456789abcdef:1234",
+    identityAtGuest?.newValue ?? "(null)");
+Check("the component type survives the relay", identityAtGuest?.componentType == "UnityEngine.AudioSource",
+    identityAtGuest?.componentType ?? "(null)");
+
 Directory.CreateDirectory(Path.GetDirectoryName(outPath)!);
 await File.WriteAllTextAsync(outPath, JsonSerializer.Serialize(new
 {

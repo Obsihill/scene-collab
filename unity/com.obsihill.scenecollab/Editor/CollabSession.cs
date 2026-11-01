@@ -463,6 +463,31 @@ namespace SceneCollab.Editor
             return opened;
         }
 
+        /// <summary>Serialised once: every server ping is answered with this exact frame.</summary>
+        static readonly string PongFrameJson = UnityWireJson.Serialize(new WireMessage { type = MessageTypes.Pong });
+
+        /// <summary>
+        /// True for the server's liveness probe. The cheap substring guard keeps every ordinary
+        /// message off the deserialiser; only text that mentions "ping" is parsed to be sure.
+        /// </summary>
+        static bool IsPingFrame(string text)
+        {
+            if (string.IsNullOrEmpty(text) || text.IndexOf("\"ping\"", StringComparison.Ordinal) < 0)
+            {
+                return false;
+            }
+
+            try
+            {
+                var message = UnityWireJson.Deserialize(text);
+                return message != null && message.type == MessageTypes.Ping;
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+        }
+
         async Task ReceiveLoopAsync(ClientWebSocket socket, CancellationToken token)
         {
             var buffer = new byte[ReceiveBufferBytes];
@@ -485,10 +510,22 @@ namespace SceneCollab.Editor
                     }
                     while (!result.EndOfMessage);
 
+                    var text = Encoding.UTF8.GetString(stream.ToArray());
+                    TouchInbound();
+
+                    if (IsPingFrame(text))
+                    {
+                        // Answered here, not on the editor main thread: saving a big scene or importing
+                        // assets parks that thread for a minute or more, and a queued pong would arrive
+                        // after the server has already given up on us.
+                        await SendTextAsync(socket, PongFrameJson, token).ConfigureAwait(false);
+                        continue;
+                    }
+
                     _inbox.Enqueue(new Inbound
                     {
                         Kind = InboundKind.Text,
-                        Text = Encoding.UTF8.GetString(stream.ToArray()),
+                        Text = text,
                     });
                 }
             }

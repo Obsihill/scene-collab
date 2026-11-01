@@ -55,7 +55,7 @@ different version must not be able to half-join and corrupt a room.
 
 ```
 client → op { type, opId, clientId, revision, opKind, nodeId, propertyPath, oldValue, newValue,
-              parentNodeId, siblingIndex, componentType, prefabGuid }
+              parentNodeId, siblingIndex, componentType, componentIndex, prefabGuid }
 server → ack { type, opId, accepted, duplicate, revision, code?, message? }
 server → op  (broadcast to every other client in the room)
 ```
@@ -138,6 +138,40 @@ A string inside an array escapes `%` → `%25` and `;` → `%3B`, so a separator
 for the next element. Writing an array sets its size first, so a change in element count syncs too.
 Arrays larger than 64 elements and empty arrays are not tracked: there is nothing to compare, and
 one terrain layer would otherwise be a megabyte per keystroke.
+
+### component fields
+
+Component fields are addressed by **type plus instance slot**:
+
+```
+c/UnityEngine.AudioSource#1/m_Volume
+  ^ type full name        ^ which AudioSource (0-based) ^ serialized path
+```
+
+The slot is what makes the second component of a type reachable. Unity's own enumeration order is the
+instance order, and `add_component` carries `componentIndex` so both editors agree on which instance
+is number 1 — an object with two AudioSources keeps two independent volumes instead of one volume
+mirrored twice. A path without a slot (`c/Type/field`) is read as slot 0, so older peers still line up.
+
+Every field an object gains with a component travels with it: the sender emits `add_component` and then
+the component's whole field set, not just the values that differ from the type defaults.
+
+### references
+
+An object reference is an identity, not a value, so it travels as one of:
+
+| form | meaning | resolution on the receiver |
+|---|---|---|
+| `ref:null` | empty slot | clear the field |
+| `ref:<guid>:<fileId>` | project asset (mesh, material, prefab, scriptable object) | `AssetDatabase.GUIDToAssetPath`, then the sub-asset with that local file id |
+| `node:<nodeId>` | another scene object | registry lookup |
+| `node:<nodeId>#<type>` | a component on another scene object | registry lookup, then `GetComponent` of that type |
+| `ref:local` | exists only on the sender (not an asset, not in the session) | not resolvable — reported, never guessed |
+
+A reference that cannot be resolved does not become an empty slot. The applier leaves an **ERROR
+marker** on the object (an emissive magenta cube that spins, labelled with the field), counts it in
+`MissingReference`, and shows the count in the window. An empty material slot looks like a deliberate
+choice; a glowing ERROR box looks like what it is — a checkout that is missing content.
 
 A value the codec cannot express is refused (`TryWrite` returns false) rather than approximated —
 the applier reports the rejection instead of writing a rounded number that quietly differs from the

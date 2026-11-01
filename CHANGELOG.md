@@ -5,7 +5,41 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.4.7] — 2026-11-01
+
+### Added
+
+- **An object arrives whole.** Creating or deleting an object, parenting it, naming it, enabling it and
+  moving it all travel as one ordered sequence: the object and its components exist first, then their
+  fields are written, and only then are references resolved. The old single pass wrote fields against a
+  half-built object, which is why a peer sometimes saw a correctly shaped but empty GameObject.
+- **Components are identified by type *and* instance slot.** The wire carries `componentIndex`, and
+  property paths read `c/UnityEngine.AudioSource#1/m_Volume`. Two AudioSources on one object used to be
+  indistinguishable — both peers read and wrote slot 0, so the second one's settings were silently
+  overwritten. An object that gains a component now sends every field of that component, not just the
+  ones that differ from the type defaults.
+- **References are synced.** A material, mesh, prefab or scriptable object travels as
+  `ref:<guid>:<fileId>`; a scene object travels as `node:<nodeId>` and a component as
+  `node:<nodeId>#<type>`. A field pointing at another object in the scene now survives the trip instead
+  of arriving null.
+- **Missing content is loud.** A reference that cannot be resolved on this machine leaves a GMod-style
+  **ERROR marker** — an emissive magenta cube that spins above the object, labelled with the field — and
+  is counted as `Unresolved refs` in the window. Values the codec cannot express are counted as
+  `Unsupported values`. Neither is silent any more, and both clear themselves when a later write lands.
+- **Sibling order is part of the data.** Every node op carries the parent's sibling index, root objects
+  included, and the snapshot is emitted stable, parent-first, in sibling order — so the live path and
+  the late-joiner path produce the same hierarchy instead of one arriving alphabetically.
+- **Prefab instances are rebuilt from their GUID.** An object whose prefab is missing shows the ERROR
+  mesh and a "missing prefab" label; a prefab instance that is present is instantiated first and its
+  overrides applied afterwards, so the override values are not lost to instantiation.
+
+### Fixed
+
+- **A busy editor no longer loses its seat.** Pong frames are written from the socket's own thread
+  instead of being queued for the editor's main thread. A minute spent saving a large scene, importing
+  assets or entering play mode used to read as silence on the server, which then hung up and forced a
+  reconnect; if the gap outlasted the timeout, the room emptied and a peer had to rejoin. The live
+  harness reproduces the failure — a 73 s project load dropped *both* participants — and passes now.
 
 ## [0.4.6] — 2026-11-01
 

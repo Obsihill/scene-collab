@@ -226,6 +226,18 @@ namespace SceneCollab.Editor
                 EditorGUILayout.LabelField("Held by lock", _sync.LocksSkipped.ToString());
                 EditorGUILayout.LabelField("Sent / rejected", _sync.Sent + " / " + _sync.Rejected);
                 EditorGUILayout.LabelField("Applied / ignored", _sync.Applied + " / " + _sync.Ignored);
+
+                if (_sync.MissingReferences > 0)
+                {
+                    EditorGUILayout.LabelField("Unresolved refs", _sync.MissingReferences.ToString(),
+                        EditorStyles.boldLabel);
+                }
+
+                if (_sync.UnsupportedValues > 0)
+                {
+                    EditorGUILayout.LabelField("Unsupported values", _sync.UnsupportedValues.ToString(),
+                        EditorStyles.boldLabel);
+                }
                 EditorGUILayout.LabelField("Last", string.IsNullOrEmpty(_sync.LastNote) ? "—" : _sync.LastNote);
 
                 using (new EditorGUILayout.HorizontalScope())

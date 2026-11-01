@@ -45,6 +45,26 @@ namespace SceneCollab.Editor.SceneSync
         readonly Dictionary<string, int> _indexByNode = new Dictionary<string, int>(StringComparer.Ordinal);
         readonly Dictionary<string, string> _componentsByNode = new Dictionary<string, string>(StringComparer.Ordinal);
 
+        /// <summary>
+        /// The exact component instances seen on each node at the last sweep. Counts can say that one of
+        /// two AudioSources disappeared; only the reference that now compares equal to null can say
+        /// <em>which</em> one, and "remove the last slot" drops the wrong instance whenever the user
+        /// deletes the first.
+        /// </summary>
+        readonly Dictionary<string, List<SeenComponent>> _instancesByNode =
+            new Dictionary<string, List<SeenComponent>>(StringComparer.Ordinal);
+
+        /// <summary>
+        /// One entry per component on an object. The type name is captured while the component is still
+        /// alive: a destroyed <see cref="Component"/> cannot be asked what it used to be, and after a
+        /// user deletes the first of two AudioSources that name is the only thing left to match on.
+        /// </summary>
+        struct SeenComponent
+        {
+            public string Type;
+            public Component Instance;
+        }
+
         public SceneStructure(SceneNodeRegistry registry)
         {
             _registry = registry;
@@ -71,6 +91,7 @@ namespace SceneCollab.Editor.SceneSync
             _parentByNode[nodeId] = TryGetParentNodeId(gameObject, out parentNodeId) ? parentNodeId : null;
             _indexByNode[nodeId] = gameObject.transform.GetSiblingIndex();
             _componentsByNode[nodeId] = ComponentSignature(gameObject);
+            _instancesByNode[nodeId] = ComponentInstances(gameObject);
         }
 
         public void Forget(string nodeId)
@@ -83,6 +104,7 @@ namespace SceneCollab.Editor.SceneSync
             _parentByNode.Remove(nodeId);
             _indexByNode.Remove(nodeId);
             _componentsByNode.Remove(nodeId);
+            _instancesByNode.Remove(nodeId);
         }
 
         public void Clear()
@@ -90,6 +112,7 @@ namespace SceneCollab.Editor.SceneSync
             _parentByNode.Clear();
             _indexByNode.Clear();
             _componentsByNode.Clear();
+            _instancesByNode.Clear();
         }
 
         public int Tracked
@@ -178,6 +201,7 @@ namespace SceneCollab.Editor.SceneSync
                 // the real one told the next sweep there was nothing to send, and the peer got a bare
                 // object with a Transform — a cube that is never visible on the other screen.
                 _componentsByNode[nodeId] = string.Empty;
+                _instancesByNode[nodeId] = ComponentInstances(gameObject);
             }
 
             created = true;
@@ -230,6 +254,7 @@ namespace SceneCollab.Editor.SceneSync
             string previous;
             if (!_componentsByNode.TryGetValue(nodeId, out previous))
             {
+                _instancesByNode[nodeId] = ComponentInstances(gameObject);
                 _componentsByNode[nodeId] = current;
                 return operations;
             }
@@ -252,6 +277,7 @@ namespace SceneCollab.Editor.SceneSync
                 int removed;
                 after.TryGetValue(pair.Key, out removed);
                 var surplus = pair.Value - removed;
+                var slots = RemovedSlots(nodeId, gameObject, pair.Key, surplus);
                 for (var i = 0; i < surplus; i++)
                 {
                     SceneOperation operation;
@@ -262,6 +288,11 @@ namespace SceneCollab.Editor.SceneSync
                     }
 
                     operation.ComponentType = pair.Key;
+
+                    // The peer has to drop the same instance this editor dropped: with two AudioSources,
+                    // removing "slot 1" when slot 0 was deleted leaves the survivor carrying the other
+                    // one's field values. The instance list says exactly which one went away.
+                    operation.ComponentIndex = i < slots.Count ? slots[i] : pair.Value - 1 - i;
                     operations.Add(operation);
                 }
             }
@@ -286,12 +317,103 @@ namespace SceneCollab.Editor.SceneSync
                     }
 
                     operation.ComponentType = pair.Key;
+
+                    // The new instance lands in the next free slot of its type; the fields that follow
+                    // address it as c/Type#that-slot/field.
+                    operation.ComponentIndex = existed + i;
                     operations.Add(operation);
                 }
             }
 
             _componentsByNode[nodeId] = current;
+            _instancesByNode[nodeId] = ComponentInstances(gameObject);
             return operations;
+        }
+
+        /// <summary>Every component on the object, in Unity's own order, missing-script holes included.</summary>
+        static List<SeenComponent> ComponentInstances(GameObject gameObject)
+        {
+            var components = gameObject.GetComponents<Component>();
+            var entries = new List<SeenComponent>(components.Length);
+            for (var i = 0; i < components.Length; i++)
+            {
+                var component = components[i];
+                entries.Add(new SeenComponent
+                {
+                    // A null entry is a component whose script is gone; it is still a slot, and skipping
+                    // it here would shift every later slot of the same type by one.
+                    Type = component == null ? "<missing>" : component.GetType().FullName,
+                    Instance = component,
+                });
+            }
+
+            return entries;
+        }
+
+        /// <summary>
+        /// Which slots of one component type lost their instance since the last sweep, lowest first.
+        ///
+        /// Comparing counts can only say that a type decreased; the destroyed reference is what says
+        /// which slot disappeared. Two AudioSources on one object are indistinguishable by type and by
+        /// name, so this is the only place the difference is observable at all.
+        /// </summary>
+        List<int> RemovedSlots(string nodeId, GameObject gameObject, string typeName, int surplus)
+        {
+            var slots = new List<int>(surplus);
+            if (surplus <= 0)
+            {
+                return slots;
+            }
+
+            List<SeenComponent> seen;
+            if (!_instancesByNode.TryGetValue(nodeId, out seen) || seen == null)
+            {
+                return slots;
+            }
+
+            // A type slot is an index into the instances *of that type*, so walking GetComponents order
+            // and counting only this type is the same numbering the wire uses.
+            var before = new List<Component>();
+            for (var i = 0; i < seen.Count; i++)
+            {
+                if (string.Equals(seen[i].Type, typeName, StringComparison.Ordinal))
+                {
+                    before.Add(seen[i].Instance);
+                }
+            }
+
+            var current = ComponentInstances(gameObject);
+            var after = new List<Component>(current.Count);
+            for (var i = 0; i < current.Count; i++)
+            {
+                if (string.Equals(current[i].Type, typeName, StringComparison.Ordinal) && current[i].Instance != null)
+                {
+                    after.Add(current[i].Instance);
+                }
+            }
+
+            for (var slot = 0; slot < before.Count && slots.Count < surplus; slot++)
+            {
+                var instance = before[slot];
+                var alive = false;
+                for (var i = 0; i < after.Count; i++)
+                {
+                    if (ReferenceEquals(after[i], instance))
+                    {
+                        alive = true;
+                        break;
+                    }
+                }
+
+                // A destroyed instance compares equal to null, so "not alive" covers both a deleted
+                // component and one whose object was destroyed under it.
+                if (!alive)
+                {
+                    slots.Add(slot);
+                }
+            }
+
+            return slots;
         }
 
         static Dictionary<string, int> CountSignature(string signature)

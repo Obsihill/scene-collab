@@ -119,6 +119,15 @@ namespace SceneCollab.Contracts.Protocol
         public string componentType;
 
         /// <summary>
+        /// Which instance of <see cref="componentType"/> the op addresses, counting from 0 in Unity's
+        /// own component order. Unity allows two AudioSources on one object, and a type-only address
+        /// would always land on the first one — the second would be edited on the sender and ignored on
+        /// the receiver, with no error on either side. Component fields carry the same slot in their
+        /// path (<c>c/UnityEngine.AudioSource#1/m_Volume</c>) so property ops say which one they mean.
+        /// </summary>
+        public int componentIndex;
+
+        /// <summary>
         /// Asset GUID a created object was made from (prefab, model). Empty for a plain GameObject.
         /// GUIDs, never paths: a path is machine-specific and a missing asset must be detectable.
         /// </summary>

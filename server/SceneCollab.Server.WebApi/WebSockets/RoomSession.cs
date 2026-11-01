@@ -335,6 +335,7 @@ namespace SceneCollab.Server.WebApi.WebSockets
                 parentNodeId = message.parentNodeId,
                 siblingIndex = message.siblingIndex,
                 componentType = message.componentType,
+                componentIndex = message.componentIndex,
                 prefabGuid = message.prefabGuid,
                 // Marks the op as part of a host snapshot so the receiver applies it without treating it
                 // as a concurrent edit (no conflict check, no undo entry).

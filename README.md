@@ -52,7 +52,7 @@ Verified end to end, not by unit tests alone:
 `Packages/manifest.json`:
 
 ```jsonc
-"com.obsihill.scenecollab": "https://github.com/Obsihill/scene-collab.git?path=unity/com.obsihill.scenecollab#v0.4.6"
+"com.obsihill.scenecollab": "https://github.com/Obsihill/scene-collab.git?path=unity/com.obsihill.scenecollab#v0.4.7"
 ```
 
 Then `Tools > Scene Collab`. Requires Unity **6000.0 or newer**.
@@ -195,6 +195,8 @@ in `Packages/manifest.json`:
    promotion, structural ops under object lock, component adds, asset manifest and placeholders.
 4. **v0.4** — component removal, missing-script stand-ins, prefab field overrides. ✅
 5. **v0.4.6** — a guest that reconnects re-requests its snapshot. ✅
+6. **v0.4.7** — an object arrives whole: components by slot, references by asset GUID / node id,
+   sibling order preserved, and missing content shows a GMod-style ERROR mesh. ✅
 6. **v0.4.5** — 20 s heartbeats both ways, dead peers hung up on after 60 s, automatic reconnect. ✅
 7. **v0.4.4** — abandoned rooms are dropped when the last participant leaves. ✅
 8. **v0.4.3** — late-joiner snapshot, prefab override promotion, peer scene-view cameras.

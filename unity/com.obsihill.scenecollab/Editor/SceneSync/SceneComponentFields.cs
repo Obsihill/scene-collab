@@ -9,17 +9,29 @@ namespace SceneCollab.Editor.SceneSync
     /// <summary>
     /// Component fields: which ones can travel, and how they are named on the wire.
     ///
-    /// A component field is addressed as <c>c/&lt;TypeFullName&gt;/&lt;serialized path&gt;</c>. That is
-    /// deliberately type-addressed rather than index-addressed: two editors can have their components in
-    /// a different order, and a field op that means "the third component" would land on the wrong one.
+    /// A component field is addressed as <c>c/&lt;TypeFullName&gt;#&lt;slot&gt;/&lt;serialized path&gt;</c>.
+    /// Type plus slot, never "the third component": two editors can have their components in a
+    /// different order, but they agree on which AudioSource is the second AudioSource. Without the slot
+    /// a second component of the same type is unreachable — every field op lands on the first one.
     ///
-    /// Only values the codec can express exactly are tracked — numbers, bools, strings, enums, colours,
-    /// vectors. Object references are not: a material reference is a guid that either resolves or does
-    /// not, and that problem belongs to the asset manifest, not to a property op.
+    /// Values the codec can express exactly are tracked — numbers, bools, strings, enums, colours,
+    /// vectors — plus object references, which travel as an asset guid + local file id or as a
+    /// scene-internal node id. A reference that cannot be resolved on the receiving machine is not
+    /// dropped silently: it becomes a visible ERROR stand-in.
     /// </summary>
     public static class SceneComponentFields
     {
         public const string Prefix = "c/";
+
+        /// <summary>Separates the type name from the instance slot: <c>c/UnityEngine.AudioSource#1/m_Volume</c>.</summary>
+        public const char SlotSeparator = '#';
+
+        /// <summary>Builds the wire path for one field of one component instance.</summary>
+        public static string BuildPath(string typeName, int slot, string serializedPath)
+        {
+            return Prefix + typeName + SlotSeparator + slot.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                + "/" + serializedPath;
+        }
 
         /// <summary>Upper bound on fields read per object, so one heavy component cannot flood the outbox.</summary>
         public const int MaxFieldsPerObject = 128;
@@ -39,7 +51,7 @@ namespace SceneCollab.Editor.SceneSync
             "m_PrefabAsset",
         };
 
-        /// <summary>Paths under <paramref name="prefix"/> for every trackable field of an object.</summary>
+        /// <summary>Paths for every trackable field of an object, one path per component instance.</summary>
         public static void CollectPaths(GameObject gameObject, List<string> into)
         {
             if (gameObject == null)
@@ -48,6 +60,8 @@ namespace SceneCollab.Editor.SceneSync
             }
 
             var components = gameObject.GetComponents<Component>();
+            var slots = new Dictionary<string, int>(StringComparer.Ordinal);
+
             for (var i = 0; i < components.Length; i++)
             {
                 var component = components[i];
@@ -63,6 +77,12 @@ namespace SceneCollab.Editor.SceneSync
                 {
                     continue;
                 }
+
+                // Slot counter per type. Unity's own enumeration order is the instance order, so both
+                // editors number the second AudioSource as 1 even when the objects differ elsewhere.
+                int slot;
+                slots.TryGetValue(typeName, out slot);
+                slots[typeName] = slot + 1;
 
                 SerializedObject serialized;
                 try
@@ -99,7 +119,7 @@ namespace SceneCollab.Editor.SceneSync
                             continue;
                         }
 
-                        into.Add(Prefix + typeName + "/" + path);
+                        into.Add(BuildPath(typeName, slot, path));
                         if (into.Count >= MaxFieldsPerObject)
                         {
                             return;
@@ -115,7 +135,7 @@ namespace SceneCollab.Editor.SceneSync
                             continue;
                         }
 
-                        into.Add(Prefix + typeName + "/" + path);
+                        into.Add(BuildPath(typeName, slot, path));
                         if (into.Count >= MaxFieldsPerObject)
                         {
                             return;
@@ -146,11 +166,21 @@ namespace SceneCollab.Editor.SceneSync
                 case SerializedPropertyType.Bounds:
                 case SerializedPropertyType.BoundsInt:
                 case SerializedPropertyType.LayerMask:
+                // A reference is an identity, not a value: it travels as an asset guid or a node id and
+                // is resolved on the receiver. Anything unresolvable becomes an ERROR stand-in.
+                case SerializedPropertyType.ObjectReference:
                     return true;
 
                 default:
                     return false;
             }
+        }
+
+        /// <summary>Value kinds an array may hold. References are excluded: an array of PPtrs is a
+        /// residency table, not a property an editor edits one field at a time.</summary>
+        public static bool IsScalar(SerializedPropertyType type)
+        {
+            return type != SerializedPropertyType.ObjectReference && IsSyncable(type);
         }
 
         /// <summary>
@@ -170,7 +200,7 @@ namespace SceneCollab.Editor.SceneSync
                 return false;
             }
 
-            return IsSyncable(property.GetArrayElementAtIndex(0).propertyType);
+            return IsScalar(property.GetArrayElementAtIndex(0).propertyType);
         }
 
         public static bool IsComponentPath(string path)
@@ -178,10 +208,11 @@ namespace SceneCollab.Editor.SceneSync
             return !string.IsNullOrEmpty(path) && path.StartsWith(Prefix, StringComparison.Ordinal);
         }
 
-        /// <summary>Splits <c>c/Type/field</c> into its two halves.</summary>
-        public static bool TryParse(string path, out string typeName, out string serializedPath)
+        /// <summary>Splits <c>c/Type#slot/field</c> into its three parts. A path without a slot is slot 0.</summary>
+        public static bool TryParse(string path, out string typeName, out int slot, out string serializedPath)
         {
             typeName = null;
+            slot = 0;
             serializedPath = null;
 
             if (!IsComponentPath(path))
@@ -195,13 +226,29 @@ namespace SceneCollab.Editor.SceneSync
                 return false;
             }
 
-            typeName = path.Substring(Prefix.Length, separator - Prefix.Length);
+            var head = path.Substring(Prefix.Length, separator - Prefix.Length);
             serializedPath = path.Substring(separator + 1);
+
+            var hash = head.LastIndexOf(SlotSeparator);
+            if (hash >= 0)
+            {
+                int parsed;
+                if (!int.TryParse(head.Substring(hash + 1), System.Globalization.NumberStyles.Integer,
+                        System.Globalization.CultureInfo.InvariantCulture, out parsed) || parsed < 0)
+                {
+                    return false;
+                }
+
+                slot = parsed;
+                head = head.Substring(0, hash);
+            }
+
+            typeName = head;
             return typeName.Length > 0 && serializedPath.Length > 0;
         }
 
-        /// <summary>Finds the component on the object that owns <paramref name="typeName"/>.</summary>
-        public static Component FindComponent(GameObject gameObject, string typeName)
+        /// <summary>Finds the component in slot <paramref name="slot"/> of the type on the object.</summary>
+        public static Component FindComponent(GameObject gameObject, string typeName, int slot)
         {
             if (gameObject == null || string.IsNullOrEmpty(typeName))
             {
@@ -209,6 +256,7 @@ namespace SceneCollab.Editor.SceneSync
             }
 
             var components = gameObject.GetComponents<Component>();
+            var seen = 0;
             for (var i = 0; i < components.Length; i++)
             {
                 var component = components[i];
@@ -217,13 +265,43 @@ namespace SceneCollab.Editor.SceneSync
                     continue;
                 }
 
-                if (string.Equals(component.GetType().FullName, typeName, StringComparison.Ordinal))
+                if (!string.Equals(component.GetType().FullName, typeName, StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                if (seen == slot)
                 {
                     return component;
                 }
+
+                seen++;
             }
 
             return null;
+        }
+
+        /// <summary>How many components of this type the object has; the next free slot for an add.</summary>
+        public static int CountOfType(GameObject gameObject, string typeName)
+        {
+            if (gameObject == null || string.IsNullOrEmpty(typeName))
+            {
+                return 0;
+            }
+
+            var components = gameObject.GetComponents<Component>();
+            var count = 0;
+            for (var i = 0; i < components.Length; i++)
+            {
+                var component = components[i];
+                if (component != null
+                    && string.Equals(component.GetType().FullName, typeName, StringComparison.Ordinal))
+                {
+                    count++;
+                }
+            }
+
+            return count;
         }
 
         /// <summary>Resolves a component type by full name across every loaded assembly.</summary>
@@ -260,7 +338,8 @@ namespace SceneCollab.Editor.SceneSync
         public static string ShortName(string path)
         {
             string typeName, serializedPath;
-            if (!TryParse(path, out typeName, out serializedPath))
+            int slot;
+            if (!TryParse(path, out typeName, out slot, out serializedPath))
             {
                 return path ?? "";
             }
@@ -268,8 +347,14 @@ namespace SceneCollab.Editor.SceneSync
             var dot = typeName.LastIndexOf('.');
             var shortType = dot >= 0 ? typeName.Substring(dot + 1) : typeName;
 
-            var builder = new StringBuilder(shortType.Length + serializedPath.Length + 1);
-            builder.Append(shortType).Append('.').Append(serializedPath);
+            var builder = new StringBuilder(shortType.Length + serializedPath.Length + 6);
+            builder.Append(shortType);
+            if (slot > 0)
+            {
+                builder.Append(SlotSeparator).Append(slot);
+            }
+
+            builder.Append('.').Append(serializedPath);
             return builder.ToString();
         }
     }

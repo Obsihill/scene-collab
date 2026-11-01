@@ -71,8 +71,30 @@ namespace SceneCollab.Editor.SceneSync
                 return false;
             }
 
-            // Parents must exist before their children are added, so depth sorts the whole payload.
-            objects.Sort(CompareByDepth);
+            // Parents must exist before their children are added, so depth sorts the whole payload —
+            // but only depth. Within one depth the enumeration order is the hierarchy order, and that is
+            // the order the receiver must see: two objects whose names sort differently from their
+            // sibling positions would otherwise arrive in a different arrangement than the host shows.
+            var hierarchyOrder = new Dictionary<GameObject, int>(objects.Count);
+            for (var i = 0; i < objects.Count; i++)
+            {
+                hierarchyOrder[objects[i]] = i;
+            }
+
+            objects.Sort((left, right) =>
+            {
+                var depthLeft = Depth(left);
+                var depthRight = Depth(right);
+                if (depthLeft != depthRight)
+                {
+                    return depthLeft.CompareTo(depthRight);
+                }
+
+                int orderLeft, orderRight;
+                hierarchyOrder.TryGetValue(left, out orderLeft);
+                hierarchyOrder.TryGetValue(right, out orderRight);
+                return orderLeft.CompareTo(orderRight);
+            });
 
             var ops = new List<WireMessage>(objects.Count * 4);
             var nodes = 0;
@@ -144,6 +166,7 @@ namespace SceneCollab.Editor.SceneSync
             // receiver (ApplyAddComponent checks first), but a component added *to* the instance is an
             // override that only arrives this way.
             var components = gameObject.GetComponents<Component>();
+            var slots = new Dictionary<string, int>(StringComparer.Ordinal);
             for (var i = 0; i < components.Length; i++)
             {
                 var component = components[i];
@@ -158,11 +181,18 @@ namespace SceneCollab.Editor.SceneSync
                     continue;
                 }
 
+                // Same slot numbering the field paths use, so the add and the fields that follow agree
+                // on which instance they mean even when the object carries two of the same type.
+                int slot;
+                slots.TryGetValue(typeName, out slot);
+                slots[typeName] = slot + 1;
+
                 ops.Add(new WireMessage
                 {
                     snapshot = true,
                     opKind = OpKinds.AddComponent,
                     nodeId = nodeId,
+                    componentIndex = slot,
                     propertyPath = "",
                     componentType = typeName,
                     oldValue = "",
@@ -187,7 +217,7 @@ namespace SceneCollab.Editor.SceneSync
             {
                 var path = paths[i];
                 string value;
-                if (!ScenePropertyAccess.TryRead(gameObject, path, out value))
+                if (!ScenePropertyAccess.TryRead(gameObject, path, registry, out value))
                 {
                     continue;
                 }
