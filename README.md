@@ -53,7 +53,7 @@ Verified end to end, not by unit tests alone:
 `Packages/manifest.json`:
 
 ```jsonc
-"com.obsihill.scenecollab": "https://github.com/Obsihill/scene-collab.git?path=unity/com.obsihill.scenecollab#v0.5.0"
+"com.obsihill.scenecollab": "https://github.com/Obsihill/scene-collab.git?path=unity/com.obsihill.scenecollab#v0.5.5"
 ```
 
 Then `Tools > Scene Collab`. Requires Unity **6000.0 or newer**.
