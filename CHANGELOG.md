@@ -5,6 +5,24 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.2] — 2026-11-02
+
+### Fixed
+
+- **ERROR markers are scene roots.** They used to be parented to the object they stand in for, so a
+  parent with a non-uniform scale (a stretched prop, a thin trigger) stretched and displaced the marker:
+  the sign saying "here is what you are missing" pointed at the wrong place at the wrong size. Markers are
+  now top-level objects sized in world units, placed on the missing object's bounds, and tracked against
+  their owner (`CollabPlaceholders.For`) instead of found by walking children. Clearing a resolved field
+  still removes exactly that one marker.
+
+### Added
+
+- **`ERROR model` setting** (`Tools ▸ Scene Collab ▸ ERROR model`): a project prefab drawn instead of the
+  built-in magenta cube, e.g. a Half-Life style ERROR sign. Stored as an asset path in
+  `ProjectSettings/SceneCollabSettings.json`. The package ships no third-party art — Valve's error model is
+  Valve's, so it stays in your project. Without it you get the emissive cube as before.
+
 ## [0.5.1] — 2026-11-02
 
 ### Changed

@@ -162,6 +162,7 @@ namespace SceneCollab.Editor
                 _settings.serverUrl = EditorGUILayout.TextField("Address", _settings.serverUrl);
                 _settings.room = EditorGUILayout.TextField("Room", _settings.room);
                 _settings.displayName = EditorGUILayout.TextField("Your name", _settings.displayName);
+                _settings.errorModelPath = ErrorModelField(_settings.errorModelPath);
                 _tokenDraft = EditorGUILayout.PasswordField("Token", _tokenDraft);
             }
 
@@ -445,6 +446,28 @@ namespace SceneCollab.Editor
             }
 
             Log("requested " + sent + " lock(s)");
+        }
+
+        /// <summary>
+        /// The prefab drawn at a missing object's place. Stored as an asset path, because the settings file is
+        /// JSON and JSON cannot hold a reference. Empty falls back to the built-in magenta cube.
+        /// </summary>
+        static string ErrorModelField(string current)
+        {
+            var prefab = string.IsNullOrEmpty(current) ? null : AssetDatabase.LoadAssetAtPath<GameObject>(current);
+            var picked = (GameObject)EditorGUILayout.ObjectField("ERROR model", prefab, typeof(GameObject), false);
+            if (picked == prefab)
+            {
+                return current;
+            }
+
+            if (picked == null)
+            {
+                return "";
+            }
+
+            var path = AssetDatabase.GetAssetPath(picked);
+            return string.IsNullOrEmpty(path) ? "" : path;
         }
 
         static string ShortGuid(string guid)

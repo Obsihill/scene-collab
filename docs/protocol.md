@@ -169,9 +169,15 @@ An object reference is an identity, not a value, so it travels as one of:
 | `ref:local` | exists only on the sender (not an asset, not in the session) | not resolvable — reported, never guessed |
 
 A reference that cannot be resolved does not become an empty slot. The applier leaves an **ERROR
-marker** on the object (an emissive magenta cube that spins, labelled with the field), counts it in
-`MissingReference`, and shows the count in the window. An empty material slot looks like a deliberate
-choice; a glowing ERROR box looks like what it is — a checkout that is missing content.
+marker** at the missing object's place (an emissive magenta cube by default; a project prefab when
+`ERROR model` is set in the window), counts it in `MissingReference`, and shows the count in the window.
+An empty material slot looks like a deliberate choice; a glowing ERROR box looks like what it is — a
+checkout that is missing content.
+
+Markers are **scene roots, not children of the object they stand in for**. Parenting them seemed tidy and
+was a bug: a parent with a non-uniform scale stretched and displaced the marker, so the sign pointed at
+the wrong place at the wrong size. They are sized in world units from the missing object's bounds and keep
+a reference to their owner, which is what `ClearError`/`Clear` walk instead of the hierarchy.
 
 A value the codec cannot express is refused (`TryWrite` returns false) rather than approximated —
 the applier reports the rejection instead of writing a rounded number that quietly differs from the

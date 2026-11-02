@@ -99,7 +99,7 @@ namespace SceneCollab.Editor.SceneSync
         {
             // Marking is idempotent by inspection rather than by bookkeeping: a second marker under the
             // same object would mean the scan ran twice, and the marker itself is the evidence.
-            if (gameObject.GetComponentInChildren<CollabMissingMarker>(true) != null)
+            if (CollabPlaceholders.For(gameObject).Length > 0)
             {
                 return false;
             }

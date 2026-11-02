@@ -198,7 +198,7 @@ in `Packages/manifest.json`:
 4. **v0.4** — component removal, missing-script stand-ins, prefab field overrides. ✅
 5. **v0.4.6** — a guest that reconnects re-requests its snapshot. ✅
 6. **v0.4.7** — an object arrives whole: components by slot, references by asset GUID / node id,
-   sibling order preserved, and missing content shows a GMod-style ERROR mesh. ✅
+   sibling order preserved, and missing content shows a GMod-style ERROR mesh (point `ERROR model` at your own prefab, e.g. a Half-Life style sign, or keep the built-in cube). ✅
 6. **v0.4.5** — 20 s heartbeats both ways, dead peers hung up on after 60 s, automatic reconnect. ✅
 7. **v0.4.4** — abandoned rooms are dropped when the last participant leaves. ✅
 8. **v0.4.3** — late-joiner snapshot, prefab override promotion, peer scene-view cameras.

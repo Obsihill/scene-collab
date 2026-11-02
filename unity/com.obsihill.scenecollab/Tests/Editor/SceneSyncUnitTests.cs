@@ -440,9 +440,56 @@ namespace SceneCollab.Editor.Tests
             Assert.IsTrue(applier.Apply(wire, out note), note);
             Assert.AreEqual(1, applier.MissingScripts);
 
-            var markers = cube.GetComponentsInChildren<CollabMissingMarker>(true);
+            var markers = CollabPlaceholders.For(cube);
             Assert.AreEqual(1, markers.Length, "no stand-in was attached for the absent script");
             StringAssert.Contains("Some.Package.That.IsNot.Installed", markers[0].label);
+        }
+
+        // ── ERROR marker placement (v0.5.2) ───────────────────────────────────
+
+        [Test]
+        public void AStandInIsASceneRootAndIgnoresItsTargetsScale()
+        {
+            var cube = SaveSceneWithCube("MarkerRoot", out _);
+            cube.transform.localScale = new Vector3(4f, 0.5f, 3f);
+
+            const string field = "m_Materials.Array.data[0]";
+            var marker = CollabPlaceholders.AttachError(cube, "missing ref: " + field, field);
+            Assert.IsNotNull(marker, "no stand-in was created");
+
+            // As a child the marker inherited the target's non-uniform scale and was shoved sideways by its
+            // transform, so the thing pointing at "what you are missing" pointed at the wrong place at the
+            // wrong size. Markers are scene roots sized in world units.
+            Assert.IsNull(marker.transform.parent, "the stand-in must not be parented to what it stands for");
+            Assert.AreEqual(cube.scene, marker.scene, "the stand-in landed in another scene");
+            Assert.AreEqual(0, cube.transform.childCount, "the target gained a child it should not have");
+
+            var expected = cube.GetComponent<Renderer>().bounds.size * 0.5f;
+            var actual = marker.transform.localScale;
+            Assert.AreEqual(expected.x, actual.x, 0.01f, "marker width still follows the target's scale");
+            Assert.AreEqual(expected.z, actual.z, 0.01f, "marker depth still follows the target's scale");
+
+            Assert.AreEqual(1, CollabPlaceholders.For(cube).Length, "the marker is not tracked against its owner");
+            Assert.IsTrue(CollabPlaceholders.ClearError(cube, field), "a resolved field must clear its marker");
+            Assert.AreEqual(0, CollabPlaceholders.For(cube).Length);
+        }
+
+        [Test]
+        public void AWholeObjectStandInFillsTheObjectsBounds()
+        {
+            var cube = SaveSceneWithCube("MarkerWhole", out _);
+            cube.transform.localScale = new Vector3(2f, 3f, 4f);
+
+            var marker = CollabPlaceholders.AttachError(cube, "(missing prefab)");
+            Assert.IsNotNull(marker);
+
+            var size = cube.GetComponent<Renderer>().bounds.size;
+            Assert.AreEqual(size.x, marker.transform.localScale.x, 0.01f, "stand-in width");
+            Assert.AreEqual(size.y, marker.transform.localScale.y, 0.01f, "stand-in height");
+            Assert.AreEqual(size.z, marker.transform.localScale.z, 0.01f, "stand-in depth");
+
+            CollabPlaceholders.Clear(cube);
+            Assert.AreEqual(0, CollabPlaceholders.For(cube).Length);
         }
 
         // ── prefab overrides (v0.4) ───────────────────────────────────────────

@@ -201,7 +201,7 @@ namespace SceneCollab.Editor.Tests
             Assert.AreEqual(1, applier.MissingReferences);
             Assert.IsNotNull(note);
 
-            var marker = cube.GetComponentInChildren<CollabMissingMarker>(true);
+            var marker = CollabPlaceholders.For(cube).Length > 0 ? CollabPlaceholders.For(cube)[0] : null;
             Assert.IsNotNull(marker, "no ERROR stand-in was created");
             Assert.AreEqual(HideFlags.DontSave, marker.gameObject.hideFlags,
                 "a placeholder must never be saved into the scene");
@@ -221,10 +221,10 @@ namespace SceneCollab.Editor.Tests
 
             string note;
             applier.Apply(SetProperty(nodeId, path, "", "ref:0000000000000000deadbeefdeadbeef:1"), out note);
-            Assert.IsNotNull(cube.GetComponentInChildren<CollabMissingMarker>(true));
+            Assert.IsTrue(CollabPlaceholders.For(cube).Length > 0);
 
             Assert.IsTrue(applier.Apply(SetProperty(nodeId, path, "", SceneReferenceCodec.NullToken), out note), note);
-            Assert.IsNull(cube.GetComponentInChildren<CollabMissingMarker>(true),
+            Assert.AreEqual(0, CollabPlaceholders.For(cube).Length,
                 "the ERROR marker outlived the reference that caused it");
         }
 
