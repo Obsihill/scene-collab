@@ -154,7 +154,20 @@ namespace SceneCollab.Editor.SceneSync
             return TryGetNodeId(gameObject, out nodeId);
         }
 
-        /// <summary>Existing id for an object, never assigning one.</summary>
+        /// <summary>
+        /// Membership only: true when this object already has an id, and never mints one.
+        ///
+        /// Detection has to ask this question. <see cref="TryGetNodeId"/> will assign an id on demand,
+        /// and since a saved scene gives every object a GlobalObjectId, asking it about an object the
+        /// room has never seen answers "yes" — so the object would be adopted silently and its peers
+        /// would never be told it exists.
+        /// </summary>
+        public bool IsRegistered(GameObject gameObject)
+        {
+            return gameObject != null && _idByObject.ContainsKey(gameObject);
+        }
+
+        /// <summary>Existing id for an object, minting one if it is persisted and has none yet.</summary>
         public bool TryGetNodeId(GameObject gameObject, out string nodeId)
         {
             nodeId = null;

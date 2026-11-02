@@ -33,8 +33,12 @@ namespace SceneCollab.Editor.SceneSync
         readonly SceneViewPresence _presence = new SceneViewPresence();
         readonly TerrainSync _terrain = new TerrainSync();
         readonly List<GameObject> _dirty = new List<GameObject>();
+        readonly List<GameObject> _undoTargets = new List<GameObject>();
+        readonly List<SceneOperation> _operations = new List<SceneOperation>();
         readonly SnapshotReceiver _snapshot = new SnapshotReceiver();
         readonly HashSet<string> _peersSeen = new HashSet<string>(StringComparer.Ordinal);
+        readonly UndoArbitration _undo = new UndoArbitration();
+        readonly SyncReadiness _readiness = new SyncReadiness();
 
         ISceneCollabSession _session;
         double _nextTick;
@@ -48,6 +52,10 @@ namespace SceneCollab.Editor.SceneSync
         bool _snapshotInFlight;
         bool _snapshotRequested;
         int _snapshotChunksSent;
+        bool _undoPending;
+        bool _wasHost;
+        double _lastInbound;
+        double _nextExternalCheck;
 
         public SceneCollabSync()
         {
@@ -92,6 +100,26 @@ namespace SceneCollab.Editor.SceneSync
         public int UnsupportedValues
         {
             get { return _applier.UnsupportedValues; }
+        }
+
+        /// <summary>Fields the last undo published to the room.</summary>
+        public int UndoPublished { get; private set; }
+
+        /// <summary>
+        /// Fields the last undo left alone because a peer had written them since. Non-zero means the
+        /// user's Ctrl+Z did less than the whole edit, and the window says so.
+        /// </summary>
+        public int UndoRefused { get; private set; }
+
+        /// <summary>True while a promoted host is still verifying the scene: saves are held.</summary>
+        public bool HostVerifying
+        {
+            get { return !_readiness.IsReady; }
+        }
+
+        public string HostStateNote
+        {
+            get { return _readiness.Reason; }
         }
 
         public int Rejected { get; private set; }
@@ -245,6 +273,12 @@ namespace SceneCollab.Editor.SceneSync
             _snapshotOutbox.Clear();
             _snapshotRequested = false;
             _terrain.Reset();
+            _readiness.Reset();
+            _undo.Clear();
+            _undoPending = false;
+            _wasHost = _session != null && _session.IsHost;
+            _nextExternalCheck = 0;
+            SceneSaveGuard.Install();
             PrimeActiveScene();
 
             _feed.Attach();
@@ -270,7 +304,11 @@ namespace SceneCollab.Editor.SceneSync
             Enabled = false;
             _outbox.Clear();
             _awaitingAck = false;
+            _readiness.Reset();
+            _undo.Clear();
+            _undoPending = false;
             SceneSaveGuard.BlockNonScribeSaves = false;
+            SceneSaveGuard.HostNotVerified = false;
 
             if (_listening)
             {
@@ -281,6 +319,7 @@ namespace SceneCollab.Editor.SceneSync
 
             _feed.Detach();
             _terrain.Reset();
+            SceneSaveGuard.Uninstall();
             LastNote = "off";
         }
 
@@ -327,18 +366,120 @@ namespace SceneCollab.Editor.SceneSync
 
         void OnUndoRedo()
         {
-            // Undo can restore any tracked value, and the feed only reports what Undo recorded, so the
-            // safe response is to re-read everything the map knows about.
-            var scene = SceneManager.GetActiveScene();
-            foreach (var gameObject in SceneNodeRegistry.EnumerateSceneObjects(scene))
+            // Undo has two problems the diff alone cannot solve: it can restore a value a peer has since
+            // changed (UndoArbitration refuses those fields), and the sweep it needs is the most expensive
+            // thing this package does (so it is deferred to the next tick and shares the outbox pump).
+            _undoPending = true;
+        }
+
+        /// <summary>
+        /// Publishes the current values after an undo: what this editor still owns goes out, what a peer
+        /// owns is put back so both sides agree.
+        /// </summary>
+        void PublishUndo()
+        {
+            _undoPending = false;
+
+            if (_session == null || _session.State != CollabConnectionState.Connected)
             {
-                var nodeId = _registry.EnsureNodeId(gameObject);
-                if (nodeId != null)
+                return;
+            }
+
+            var scene = SceneManager.GetActiveScene();
+            if (!scene.IsValid() || !scene.isLoaded)
+            {
+                return;
+            }
+
+            var selfId = _session.ClientId;
+            _undo.SelfId = selfId;
+            _undo.ResetCounters();
+
+            var published = 0;
+            var refused = 0;
+
+            // Undo reports the objects it touched, so a property undo costs what that object costs and
+            // not what the scene costs. Only a structural undo (add/remove/reparent) reports nothing
+            // usable, and only then is a full sweep the right answer.
+            _undoTargets.Clear();
+            var structural = _feed.Drain(_undoTargets);
+
+            if (_undoTargets.Count > 0)
+            {
+                for (var t = 0; t < _undoTargets.Count; t++)
                 {
-                    _diff.Collect(gameObject, nodeId);
-                    _structure.Baseline(gameObject, nodeId);
+                    VisitForUndo(_undoTargets[t], selfId, ref published, ref refused);
                 }
             }
+            else
+            {
+                foreach (var gameObject in SceneNodeRegistry.EnumerateSceneObjects(scene))
+                {
+                    VisitForUndo(gameObject, selfId, ref published, ref refused);
+                }
+            }
+
+            UndoPublished = published;
+            UndoRefused = refused;
+            LastNote = refused > 0
+                ? "undo: " + published + " field(s) sent, " + refused + " kept a peer's value"
+                : "undo: " + published + " field(s) sent";
+
+            if (structural)
+            {
+                CollectStructure();
+            }
+
+            PumpOutbox();
+        }
+
+        /// <summary>One object of an undo sweep: publish what we own, put back what a peer owns.</summary>
+        void VisitForUndo(GameObject gameObject, string selfId, ref int published, ref int refused)
+        {
+            if (gameObject == null)
+            {
+                return;
+            }
+
+            var nodeId = _registry.EnsureNodeId(gameObject);
+            if (nodeId == null)
+            {
+                return;
+            }
+
+            _diff.CollectInto(gameObject, nodeId, _operations);
+            _structure.Baseline(gameObject, nodeId);
+
+            for (var i = 0; i < _operations.Count; i++)
+            {
+                var operation = _operations[i];
+                if (!_undo.ShouldPublish(operation))
+                {
+                    // A peer wrote this field after we did, so its value is the room's truth and the
+                    // undone value is nobody's. Re-apply the peer's value locally instead of sending a
+                    // revert: the alternative is this editor showing a value no one else has.
+                    RestorePeerValue(operation);
+                    refused++;
+                    continue;
+                }
+
+                _outbox.Enqueue(operation);
+                _undo.NoteWrite(operation.NodeId, operation.PropertyPath, selfId);
+                published++;
+            }
+        }
+
+        /// <summary>Puts a peer's value back after an undo was refused for that field.</summary>
+        void RestorePeerValue(SceneOperation operation)
+        {
+            var revert = operation;
+            revert.OldValue = operation.NewValue;
+            revert.NewValue = operation.OldValue;
+
+            string note;
+            _applier.Apply(
+                revert.ToWire(_session.ClientId, _session.RoomName, _session.Revision, null),
+                out note);
         }
 
         /// <summary>
@@ -408,6 +549,18 @@ namespace SceneCollab.Editor.SceneSync
 
             var now = EditorApplication.timeSinceStartup;
 
+            // A scene file that changed without a save here means another tool (or another editor) wrote
+            // it. Checked on a slow clock because it hashes the file; reported, never auto-reverted.
+            if (now >= _nextExternalCheck)
+            {
+                _nextExternalCheck = now + 10.0;
+                var active = SceneManager.GetActiveScene();
+                if (active.IsValid() && !string.IsNullOrEmpty(active.path))
+                {
+                    SceneSaveGuard.CheckExternalWrite(active.path);
+                }
+            }
+
             // Retire stale ERROR markers even when disconnected: one hung up while an asset was importing
             // outlives the connection, and it lies about a checkout that has already caught up. Walks the
             // marker list, not the scene, so it can run on a slow clock.
@@ -449,7 +602,13 @@ namespace SceneCollab.Editor.SceneSync
                 _feed.Drain(_dirty);
                 _dirty.Clear();
                 PumpOutbox();
+                UpdateReadiness(now);
                 return;
+            }
+
+            if (_undoPending)
+            {
+                PublishUndo();
             }
 
             _dirty.Clear();
@@ -476,10 +635,15 @@ namespace SceneCollab.Editor.SceneSync
                     continue;
                 }
 
-                var operations = _diff.Collect(gameObject, nodeId);
-                for (var j = 0; j < operations.Count; j++)
+                _diff.CollectInto(gameObject, nodeId, _operations);
+                for (var j = 0; j < _operations.Count; j++)
                 {
-                    _outbox.Enqueue(operations[j]);
+                    var operation = _operations[j];
+                    _outbox.Enqueue(operation);
+
+                    // Ownership is what an undo is checked against later: this field is ours until a
+                    // peer's op for the same path lands.
+                    _undo.NoteWrite(nodeId, operation.PropertyPath, _session.ClientId);
                 }
             }
 
@@ -489,6 +653,23 @@ namespace SceneCollab.Editor.SceneSync
             }
 
             PumpOutbox();
+            UpdateReadiness(now);
+        }
+
+        /// <summary>
+        /// Feeds the queue state to the promotion gate: a promoted host may save only once nothing is
+        /// in flight and the room has been quiet for a moment.
+        /// </summary>
+        void UpdateReadiness(double now)
+        {
+            var busy = _snapshot.Active
+                || _snapshotInFlight
+                || _awaitingAck
+                || _outbox.Count > 0
+                || now - _lastInbound < SyncReadiness.QuietSeconds;
+
+            _readiness.Tick(now, busy);
+            UpdateSaveGuard();
         }
 
         /// <summary>
@@ -712,6 +893,8 @@ namespace SceneCollab.Editor.SceneSync
                 return;
             }
 
+            _lastInbound = EditorApplication.timeSinceStartup;
+
             switch (message.opKind)
             {
                 case OpKinds.SnapshotStart:
@@ -740,6 +923,7 @@ namespace SceneCollab.Editor.SceneSync
                     PrimeActiveScene();
                     if (_applier.Apply(message, out note))
                     {
+                        NoteApplied(message);
                         LastNote = "applied " + message.opKind + " " + message.propertyPath;
                         return;
                     }
@@ -749,7 +933,23 @@ namespace SceneCollab.Editor.SceneSync
                 return;
             }
 
+            NoteApplied(message);
             LastNote = "applied " + message.propertyPath + " from " + (message.displayName ?? "peer");
+        }
+
+        /// <summary>
+        /// Records the peer as the owner of what it just wrote, and forgets a node it deleted, so a later
+        /// local undo knows which fields it must not touch.
+        /// </summary>
+        void NoteApplied(WireMessage message)
+        {
+            if (message.opKind == OpKinds.RemoveNode)
+            {
+                _undo.Forget(message.nodeId);
+                return;
+            }
+
+            _undo.NoteWrite(message.nodeId, message.propertyPath, message.clientId);
         }
 
         void OnOperationAcknowledged(WireMessage message)
@@ -789,6 +989,20 @@ namespace SceneCollab.Editor.SceneSync
 
         void OnStateChanged()
         {
+            var connected = _session != null && _session.State == CollabConnectionState.Connected;
+            var isHost = connected && _session.IsHost;
+
+            if (isHost && !_wasHost && Enabled)
+            {
+                // Promoted. The save right came back with the title, but the scene may still be missing
+                // the tail of the session — the queue does not stop at the promotion frame. Saves are held
+                // until the room has been quiet, and the window shows why.
+                _readiness.MarkPromoted(EditorApplication.timeSinceStartup);
+                _undo.Clear();
+                LastNote = "promoted to host: verifying before saves are allowed";
+            }
+
+            _wasHost = isHost;
             UpdateSaveGuard();
 
             if (_session != null && _session.State != CollabConnectionState.Connected)
@@ -1054,10 +1268,15 @@ namespace SceneCollab.Editor.SceneSync
 
         void UpdateSaveGuard()
         {
-            SceneSaveGuard.BlockNonScribeSaves =
-                Enabled && _session != null
-                && _session.State == CollabConnectionState.Connected
-                && !_session.IsHost;
+            var connected = Enabled && _session != null
+                && _session.State == CollabConnectionState.Connected;
+
+            SceneSaveGuard.BlockNonScribeSaves = connected && !_session.IsHost;
+
+            // The new host may save only once it has caught up: a partial scene written to Git is the
+            // one failure this design cannot undo, because the file is the source of truth for everyone
+            // else who opens it later.
+            SceneSaveGuard.HostNotVerified = connected && _session.IsHost && !_readiness.IsReady;
         }
 
         void OnSceneSaved(Scene scene)

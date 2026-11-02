@@ -31,6 +31,16 @@ namespace SceneCollab.Editor.SceneSync
         public const string KindHeight = "height";
         public const string KindSplat = "splat";
 
+        /// <summary>
+        /// The wire's height quantisation, exposed so the sampler can skip samples the wire would carry
+        /// identically. Comparing raw floats would report a changed tile for noise the receiver throws
+        /// away, and then send a patch with no bytes in it.
+        /// </summary>
+        public static ushort QuantizeHeight(float value)
+        {
+            return Quantize(value);
+        }
+
         static ushort Quantize(float value)
         {
             var scaled = Mathf.RoundToInt(Mathf.Clamp(value, 0f, 1f) * 65535f);

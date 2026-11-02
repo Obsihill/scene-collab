@@ -105,6 +105,31 @@ builds and breaks on Missing Script.
 - The server never executes anything from a client: ops are data, applied by the editor that
   receives them.
 
+## 8. What a big scene costs (v0.5.5)
+
+The obvious worry about a tool like this is that it walks the scene every tick and falls over on a
+large level. It does not walk the scene every tick — the change feed hands over only the objects that
+Unity says were touched — but "it should be fine" is not a number, so the suite now measures the real
+diff, registry and structure walk over 1500 objects. These are this machine's figures (Ryzen AI 9
+HX 370, Unity 6000.6.4f1, EditMode, batch), logged as `[BENCH]` on every test run:
+
+| Operation | Scene size | Cost |
+|---|---|---|
+| Baseline one object (first join / snapshot) | 1500 objects | 82 ms total — once, not per tick |
+| Steady-state diff sweep, nothing changed | 1500 objects | 90 ms for a *full* sweep, 0 ops |
+| Diff of a tenth of the scene moved | 1500 objects | 89 ms, 150 ops |
+| One object, all tracked fields | — | ~0.15 ms |
+| Structure walk (`DetectUnregistered`) | 1500 objects | 1.0 ms |
+| Terrain height poll, 1024² heightmap | 81 wire tiles | 21–25 ms, no 4 MiB array |
+
+Two numbers matter. The per-tick cost is proportional to **what was edited**, not to scene size: the
+full sweep above only happens on the first sync. And the terrain poll now reads one 128×128 tile at a
+time, so a poll allocates 16 KiB per tile instead of a 4 MiB array plus a full copy — the allocation
+that would otherwise surface as a hitch an hour into an editing session.
+
+The ceilings in the benchmark are deliberately loose (seconds, not milliseconds). They are there to
+catch an order-of-magnitude regression, not to police a loaded CI box.
+
 ## 7. Known risks
 
 | Risk | Mitigation |

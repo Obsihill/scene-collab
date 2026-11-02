@@ -148,7 +148,7 @@ namespace SceneCollab.Editor.SceneSync
 
             foreach (var gameObject in SceneNodeRegistry.EnumerateSceneObjects(scene))
             {
-                if (gameObject == null || _registry.HasNodeId(gameObject))
+                if (gameObject == null || _registry.IsRegistered(gameObject))
                 {
                     continue;
                 }

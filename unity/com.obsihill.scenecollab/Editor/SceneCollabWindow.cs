@@ -239,6 +239,27 @@ namespace SceneCollab.Editor
                     EditorGUILayout.LabelField("Unsupported values", _sync.UnsupportedValues.ToString(),
                         EditorStyles.boldLabel);
                 }
+                if (_sync.HostVerifying)
+                {
+                    EditorGUILayout.HelpBox(
+                        "This editor was just promoted to host and is still catching up (" + _sync.HostStateNote
+                        + "). Saving is held until the room goes quiet, so what reaches Git is the whole "
+                        + "session and not the part that had arrived.",
+                        MessageType.Warning);
+                }
+
+                if (_sync.UndoRefused > 0)
+                {
+                    // Ctrl+Z is the one local edit that can reach into someone else's change. Saying how
+                    // much of it was kept is the difference between a baffling partial undo and a rule
+                    // the user can predict.
+                    EditorGUILayout.HelpBox(
+                        "Your last undo restored " + _sync.UndoPublished + " value(s) and left "
+                        + _sync.UndoRefused + " alone: another editor changed those after you did, so the "
+                        + "room's value was kept.",
+                        MessageType.Info);
+                }
+
                 EditorGUILayout.LabelField("Last", string.IsNullOrEmpty(_sync.LastNote) ? "—" : _sync.LastNote);
 
                 using (new EditorGUILayout.HorizontalScope())

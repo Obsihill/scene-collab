@@ -5,6 +5,35 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.5] — 2026-11-02
+
+Five things a scene-sharing tool is expected to get right before anyone trusts it with a level. Each of
+them was either missing or unproven, so each is now implemented and measured.
+
+### Fixed
+
+- **Ctrl+Z no longer reaches into a colleague's newer edit.** Undo is a local history replayed as fresh
+  ops, which meant A's undo could quietly re-impose a value B had changed a minute earlier. Every field
+  now remembers who wrote it last: when an undo would restore a field a peer has since claimed, that
+  field is left alone and the rest of the undo applies normally. The window reports the split —
+  "restored 3 value(s), left 1 alone" — so a partial undo is explained instead of mysterious.
+- **A promoted host cannot save a scene it has not caught up with.** Promotion of the longest-connected
+  guest already worked; what was missing was the proof that its copy held every op. Saving is now gated
+  until the snapshot has landed, the outbox is empty and the room has been silent for 0.75 s. The guard
+  holds the scene file closed meanwhile and the window says why, so Git cannot receive a half-synced
+  scene from the one editor that is allowed to write.
+- **The save guard no longer trusts the path alone.** It hashes the scene file at the last allowed save
+  and re-checks it on every write attempt, so a tool that serialises a scene directly — bypassing the
+  normal save prompt — is caught and reported rather than silently writing a partial scene.
+
+### Changed
+
+- **Terrain polls read the heightmap one wire tile (128×128) at a time.** A 1024×1024 heightmap used to
+  cost a single 4 MiB `GetHeights` call plus a full array copy on every poll, which is exactly the
+  garbage that surfaces later as a hitch. The patch put on the wire is still as tight as the stroke.
+- **Large-scene cost is now measured rather than estimated**, by a benchmark that runs the real diff,
+  registry and structure walk over 1500 objects in the test suite (numbers in `docs/design.md §8`).
+
 ## [0.5.4] — 2026-11-02
 
 ### Changed

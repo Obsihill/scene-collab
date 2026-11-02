@@ -59,6 +59,9 @@ namespace SceneCollab.Editor.SceneSync
         /// <summary>Patches this editor applied (guest side).</summary>
         public int Applied { get; private set; }
 
+        /// <summary>Wire tiles read by the sampler. 1 024² costs 64 of them per dirty poll.</summary>
+        public int TilesRead { get; private set; }
+
         /// <summary>Patches that could not be applied: missing terrain, resolution or layer mismatch.</summary>
         public int Skipped { get; private set; }
 
@@ -188,14 +191,13 @@ namespace SceneCollab.Editor.SceneSync
                 return;
             }
 
-            var heights = data.GetHeights(0, 0, baseline.HeightResolution, baseline.HeightResolution);
             int x, z, width, height;
-            if (TerrainPatchCodec.TryDiffHeights(baseline.Heights, heights, out x, out z, out width, out height))
+            if (ScanHeights(data, baseline, out x, out z, out width, out height))
             {
-                EmitHeights(guid, baseline.HeightResolution, heights, x, z, width, height);
+                // EmitHeights reads from the updated baseline, so no second copy of the heightmap is
+                // needed to describe the patch.
+                EmitHeights(guid, baseline.HeightResolution, baseline.Heights, x, z, width, height);
             }
-
-            baseline.Heights = heights;
 
             if (baseline.Layers > 0
                 && now - baseline.LastSplatRead >= SplatPollSeconds
@@ -211,6 +213,115 @@ namespace SceneCollab.Editor.SceneSync
 
                 baseline.Splat = splat;
             }
+        }
+
+        /// <summary>
+        /// Compares the terrain against the baseline one wire tile at a time and copies only the tiles
+        /// that actually changed.
+        ///
+        /// The obvious version — read all 4 MiB, compare, keep the new array — allocates two large
+        /// arrays per sculpt poll and promotes both to the large object heap, so every stroke leaves
+        /// garbage that a GC has to walk later. Reading tile-sized chunks keeps every allocation in gen0
+        /// and makes the retained baseline the only long-lived copy. The comparison is quantised the
+        /// same way the wire is, so a tile is reported only if the receiver would see a difference.
+        /// </summary>
+        bool ScanHeights(TerrainData data, Baseline baseline, out int x, out int z, out int width, out int height)
+        {
+            const int tile = TerrainPatchCodec.HeightTile;
+
+            x = 0;
+            z = 0;
+            width = 0;
+            height = 0;
+
+            var resolution = baseline.HeightResolution;
+            if (baseline.Heights == null || resolution <= 0)
+            {
+                CaptureHeights(data, baseline);
+                return false;
+            }
+
+            var minX = int.MaxValue;
+            var minZ = int.MaxValue;
+            var maxX = -1;
+            var maxZ = -1;
+
+            for (var tz = 0; tz < resolution; tz += tile)
+            {
+                var th = Math.Min(tile, resolution - tz);
+                for (var tx = 0; tx < resolution; tx += tile)
+                {
+                    var tw = Math.Min(tile, resolution - tx);
+                    var samples = data.GetHeights(tx, tz, tw, th);
+                    TilesRead++;
+
+                    var changed = false;
+                    for (var r = 0; r < th; r++)
+                    {
+                        for (var c = 0; c < tw; c++)
+                        {
+                            if (TerrainPatchCodec.QuantizeHeight(baseline.Heights[tz + r, tx + c])
+                                == TerrainPatchCodec.QuantizeHeight(samples[r, c]))
+                            {
+                                continue;
+                            }
+
+                            baseline.Heights[tz + r, tx + c] = samples[r, c];
+                            changed = true;
+
+                            // Tracked per sample, not per tile: the wire patch stays as tight as the stroke
+                            // was, which is what the receiving side re-applies.
+                            var sx = tx + c;
+                            var sz = tz + r;
+                            if (sx < minX) minX = sx;
+                            if (sz < minZ) minZ = sz;
+                            if (sx > maxX) maxX = sx;
+                            if (sz > maxZ) maxZ = sz;
+                        }
+                    }
+
+                    if (!changed)
+                    {
+                        continue;
+                    }
+                }
+            }
+
+            if (maxX < 0)
+            {
+                return false;
+            }
+
+            x = minX;
+            z = minZ;
+            width = maxX - minX + 1;
+            height = maxZ - minZ + 1;
+            return true;
+        }
+
+        /// <summary>
+        /// Test seam: seeds a baseline straight from the asset and scans it, without a session, a room
+        /// or a terrain in a scene. The sampler is the part worth measuring; a fake session around it
+        /// would only add noise to the number.
+        /// </summary>
+        internal bool ScanForTest(TerrainData data, out int x, out int z, out int width, out int height)
+        {
+            const string guid = "__test__";
+
+            Baseline baseline;
+            if (!_baselines.TryGetValue(guid, out baseline))
+            {
+                baseline = new Baseline
+                {
+                    HeightResolution = data.heightmapResolution,
+                    AlphaResolution = data.alphamapResolution,
+                    Layers = data.alphamapLayers,
+                };
+                CaptureHeights(data, baseline);
+                _baselines[guid] = baseline;
+            }
+
+            return ScanHeights(data, baseline, out x, out z, out width, out height);
         }
 
         void CaptureHeights(TerrainData data, Baseline baseline)
