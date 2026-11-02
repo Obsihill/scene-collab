@@ -5,6 +5,19 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.1] — 2026-11-02
+
+### Changed
+
+- **ERROR markers no longer move or follow the camera.** The floating `TextMesh` label is gone, and with
+  it the slow turn, the bob and the camera-facing billboard: an annotation that tracks your view is noise
+  exactly while you are trying to work. What stays is the part that does the job — a static magenta cube,
+  emission on, sitting where the missing object would be. The reason moved to where it is not in the way:
+  the marker's name in the hierarchy (`__collab_missing__ missing prefab: …`, `missing script: …`,
+  `missing ref: …`) and the window's asset report, which now points at it.
+- The editor no longer pays an `EditorApplication.update` callback for placeholder animation; a marker is
+  created once and left alone.
+
 ## [0.5.0] — 2026-11-02
 
 ### Added

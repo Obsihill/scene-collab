@@ -296,7 +296,9 @@ namespace SceneCollab.Editor
                 if (!string.IsNullOrEmpty(_sync.AssetNote))
                 {
                     EditorGUILayout.HelpBox(_sync.AssetNote + " — magenta boxes mark what this "
-                        + "checkout cannot resolve. They are not saved.", MessageType.Warning);
+                        + "checkout cannot resolve. They are not saved. The reason is in each box's "
+                        + "name (" + SceneCollab.Editor.SceneSync.CollabPlaceholders.MarkerName
+                        + " …) in the hierarchy.", MessageType.Warning);
                 }
 
                 if (connected)

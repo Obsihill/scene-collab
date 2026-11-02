@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using UnityEditor;
 using UnityEngine;
 
 namespace SceneCollab.Editor.SceneSync
@@ -13,10 +12,10 @@ namespace SceneCollab.Editor.SceneSync
     /// stares at an empty patch of level and cannot tell whether the artist deleted something or whether
     /// their checkout is incomplete.
     ///
-    /// So a missing thing does not render as nothing here: it renders as a glowing magenta ERROR cube with
-    /// a floating label, slowly turning. That is a deliberate joke at our own expense, and it is also the
-    /// fastest way to answer "why does my level look different from theirs" — you can see it from across
-    /// the scene view instead of hunting the inspector.
+    /// So a missing thing does not render as nothing here: it renders as a glowing magenta ERROR cube,
+    /// sized to the object it stands in for and sitting exactly where that object would be. Nothing here
+    /// moves or tracks the camera — an annotation that follows the view is noise while you work. The
+    /// reason lives in the marker's own name in the hierarchy and in the window's asset report.
     ///
     /// Everything created here is <see cref="HideFlags.DontSave"/> and is never registered as a node, so it
     /// cannot leak into the host's saved scene or into the op stream.
@@ -30,18 +29,9 @@ namespace SceneCollab.Editor.SceneSync
         static readonly Color ErrorColor = new Color(1f, 0.05f, 0.75f, 1f);
 
         static Material _material;
-        static Material _labelMaterial;
-        static Font _font;
 
-        /// <summary>Every live marker, so the editor update can animate them without a scene scan.</summary>
+        /// <summary>Every live marker, so a revert can drop them without scanning the scene.</summary>
         static readonly List<CollabMissingMarker> Markers = new List<CollabMissingMarker>();
-
-        [InitializeOnLoadMethod]
-        static void Hook()
-        {
-            EditorApplication.update -= Tick;
-            EditorApplication.update += Tick;
-        }
 
         /// <summary>Builds the magenta box used for missing meshes and prefabs.</summary>
         public static GameObject Create(string label, Vector3 size)
@@ -82,9 +72,9 @@ namespace SceneCollab.Editor.SceneSync
         }
 
         /// <summary>
-        /// The whole-object stand-in: a spinning emissive cube sized to the object's own bounds, with the
-        /// reason floating above it. Used when nothing of the object could be built (missing prefab, missing
-        /// script) rather than when one field of an otherwise fine object could not be resolved.
+        /// The whole-object stand-in: a static emissive cube sized to the object's own bounds. Used when
+        /// nothing of the object could be built (missing prefab, missing script) rather than when one field
+        /// of an otherwise fine object could not be resolved.
         /// </summary>
         public static GameObject AttachError(GameObject target, string label)
         {
@@ -129,10 +119,9 @@ namespace SceneCollab.Editor.SceneSync
             var marker = box.AddComponent<CollabMissingMarker>();
             marker.label = label;
             marker.fieldPath = fieldPath;
-            marker.baseScale = Vector3.one * (wholeObject ? 1f : 0.5f);
             marker.hideFlags = HideFlags.DontSave;
 
-            AddLabel(box.transform, fieldPath == null ? "ERROR" : "ERROR\n" + SceneComponentFields.ShortName(fieldPath), wholeObject);
+
 
             if (!Markers.Contains(marker))
             {
@@ -201,34 +190,6 @@ namespace SceneCollab.Editor.SceneSync
             return markers.Length;
         }
 
-        /// <summary>Spins and bobs every live marker. Cheap: a handful of transforms at most.</summary>
-        static void Tick()
-        {
-            if (Markers.Count == 0)
-            {
-                return;
-            }
-
-            var now = (float)EditorApplication.timeSinceStartup;
-
-            for (var i = Markers.Count - 1; i >= 0; i--)
-            {
-                var marker = Markers[i];
-                if (marker == null)
-                {
-                    Markers.RemoveAt(i);
-                    continue;
-                }
-
-                if (EditorApplication.isPlayingOrWillChangePlaymode)
-                {
-                    continue;
-                }
-
-                marker.Tick(now);
-            }
-        }
-
         static Vector3 ObjectSize(GameObject target)
         {
             var renderers = target.GetComponentsInChildren<Renderer>();
@@ -249,54 +210,6 @@ namespace SceneCollab.Editor.SceneSync
             }
 
             return bounds.size;
-        }
-
-        static void AddLabel(Transform parent, string text, bool big)
-        {
-            var label = new GameObject("label");
-            label.hideFlags = HideFlags.DontSave;
-            label.transform.SetParent(parent, false);
-            label.transform.localPosition = Vector3.up * (big ? 30f : 220f);
-            label.transform.localRotation = Quaternion.identity;
-            label.transform.localScale = Vector3.one;
-
-            var mesh = label.AddComponent<TextMesh>();
-            mesh.text = text;
-            mesh.anchor = TextAnchor.MiddleCenter;
-            mesh.alignment = TextAlignment.Center;
-            mesh.fontSize = 64;
-            mesh.characterSize = big ? 30f : 90f;
-            mesh.color = Color.white;
-
-            var font = Font();
-            if (font != null)
-            {
-                mesh.font = font;
-                var renderer = label.GetComponent<MeshRenderer>();
-                if (renderer != null)
-                {
-                    renderer.sharedMaterial = LabelMaterial();
-                    renderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
-                    renderer.receiveShadows = false;
-                }
-            }
-        }
-
-        static Font Font()
-        {
-            if (_font != null)
-            {
-                return _font;
-            }
-
-            // Arial.ttf was removed from the builtin resources in 2022.2; LegacyRuntime.ttf replaced it.
-            _font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
-            if (_font == null)
-            {
-                _font = Resources.GetBuiltinResource<Font>("Arial.ttf");
-            }
-
-            return _font;
         }
 
         static Material ErrorMaterial()
@@ -346,25 +259,6 @@ namespace SceneCollab.Editor.SceneSync
             return _material;
         }
 
-        static Material LabelMaterial()
-        {
-            if (_labelMaterial != null)
-            {
-                return _labelMaterial;
-            }
-
-            var shader = Shader.Find("GUI/Text Shader");
-            if (shader == null)
-            {
-                shader = Shader.Find("Unlit/Transparent");
-            }
-
-            _labelMaterial = new Material(shader);
-            _labelMaterial.name = "SceneCollab Error Label";
-            _labelMaterial.hideFlags = HideFlags.DontSave;
-            return _labelMaterial;
-        }
-
         /// <summary>Counts missing assets on the loaded scene's objects and builds the operator report.</summary>
         public static string Describe(int missingAssets, int missingScripts, int missingReferences)
         {
@@ -406,46 +300,5 @@ namespace SceneCollab.Editor.SceneSync
 
         /// <summary>Set for field-level markers; null for whole-object ones.</summary>
         public string fieldPath;
-
-        public Vector3 baseScale = Vector3.one;
-
-        Vector3 _basePosition;
-        bool _captured;
-
-        public void Tick(float now)
-        {
-            if (this == null || transform == null)
-            {
-                return;
-            }
-
-            if (!_captured)
-            {
-                _basePosition = transform.localPosition;
-                _captured = true;
-            }
-
-            // A slow turn and a small bob: enough motion that the eye catches it in a still scene, small
-            // enough that it never fights the object you are actually trying to edit.
-            transform.localRotation = Quaternion.Euler(0f, (now * 45f) % 360f, 0f);
-            transform.localPosition = _basePosition + Vector3.up * (Mathf.Sin(now * 2f) * 0.06f);
-            transform.localScale = baseScale * (1f + Mathf.Sin(now * 3f) * 0.03f);
-
-            var labelTransform = transform.childCount > 0 ? transform.GetChild(0) : null;
-            var camera = Camera.current != null ? Camera.current : SceneView.lastActiveSceneView?.camera;
-            if (labelTransform != null && camera != null)
-            {
-                // Billboard, not parent-relative: text that turns away with the cube is unreadable at
-                // exactly the angles where you notice an object is wrong.
-                labelTransform.rotation = camera.transform.rotation;
-                labelTransform.localScale = Vector3.one;
-            }
-        }
-
-        void OnDrawGizmos()
-        {
-            Gizmos.color = Color.magenta;
-            Gizmos.DrawWireCube(transform.position, transform.lossyScale);
-        }
     }
 }
