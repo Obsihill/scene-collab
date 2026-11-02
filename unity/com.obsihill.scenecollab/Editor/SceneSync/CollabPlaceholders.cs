@@ -37,6 +37,12 @@ namespace SceneCollab.Editor.SceneSync
         public const string MarkerName = "__collab_missing__";
         public const string MarkerTag = "value:missing";
 
+        /// <summary>What made the marker: what the refresh pass re-checks to decide it can go away.</summary>
+        public const string ReasonPrefab = "prefab";
+        public const string ReasonScript = "script";
+        public const string ReasonMesh = "mesh";
+        public const string ReasonReference = "reference";
+
         /// <summary>Magenta, unlit-ish and emissive: visible in a dark scene and in any render pipeline.</summary>
         static readonly Color ErrorColor = new Color(1f, 0.05f, 0.75f, 1f);
 
@@ -86,7 +92,7 @@ namespace SceneCollab.Editor.SceneSync
         /// </summary>
         public static GameObject AttachError(GameObject target, string label)
         {
-            return AttachError(target, label, null, true);
+            return AttachError(target, label, null, null, null, true);
         }
 
         /// <summary>
@@ -95,10 +101,61 @@ namespace SceneCollab.Editor.SceneSync
         /// </summary>
         public static GameObject AttachError(GameObject target, string label, string fieldPath)
         {
-            return AttachError(target, label, fieldPath, false);
+            return AttachError(target, label, fieldPath, null, ReasonReference);
         }
 
-        static GameObject AttachError(GameObject target, string label, string fieldPath, bool wholeObject)
+        /// <summary>Same, but remembering which asset the field pointed at, so the refresh can retire it.</summary>
+        public static GameObject AttachError(GameObject target, string label, string fieldPath, string assetGuid)
+        {
+            return AttachError(target, label, fieldPath, assetGuid, 0L);
+        }
+
+        public static GameObject AttachError(GameObject target, string label, string fieldPath, string assetGuid,
+            long localFileId)
+        {
+            var body = AttachError(target, label, fieldPath, assetGuid, ReasonReference);
+            var component = body != null && target != null ? body.GetComponent<CollabMissingMarker>() : null;
+            if (component != null)
+            {
+                component.localFileId = localFileId;
+            }
+
+            return body;
+        }
+
+        /// <summary>A node whose prefab asset this checkout does not have (yet).</summary>
+        public static GameObject AttachPrefabError(GameObject target, string label, string assetGuid)
+        {
+            return AttachError(target, label, null, assetGuid, ReasonPrefab);
+        }
+
+        /// <summary>A component whose script type this project cannot load (yet).</summary>
+        public static GameObject AttachScriptError(GameObject target, string label, string typeName)
+        {
+            var marker = AttachError(target, label, null, null, ReasonScript);
+            var component = marker == null ? null : marker.GetComponent<CollabMissingMarker>();
+            if (component != null)
+            {
+                component.scriptType = typeName;
+            }
+
+            return marker;
+        }
+
+        /// <summary>An object whose mesh or material is missing on this machine.</summary>
+        public static GameObject AttachMeshError(GameObject target, string label)
+        {
+            return AttachError(target, label, null, null, ReasonMesh);
+        }
+
+        static GameObject AttachError(GameObject target, string label, string fieldPath, string assetGuid,
+            string reasonKind)
+        {
+            return AttachError(target, label, fieldPath, assetGuid, reasonKind, string.IsNullOrEmpty(fieldPath));
+        }
+
+        static GameObject AttachError(GameObject target, string label, string fieldPath, string assetGuid,
+            string reasonKind, bool wholeObject)
         {
             if (target == null)
             {
@@ -138,6 +195,8 @@ namespace SceneCollab.Editor.SceneSync
             var marker = body.AddComponent<CollabMissingMarker>();
             marker.label = label;
             marker.fieldPath = fieldPath;
+            marker.reasonKind = reasonKind;
+            marker.assetGuid = assetGuid;
             marker.owner = target;
             marker.hideFlags = HideFlags.DontSave;
 
@@ -244,6 +303,143 @@ namespace SceneCollab.Editor.SceneSync
             }
 
             return removed;
+        }
+
+        /// <summary>
+        /// Retires every marker whose reason no longer holds, and orphans of objects that are gone.
+        ///
+        /// This is the other half of marking, and its absence was a bug users saw: a marker was hung up
+        /// while an asset was still importing (or while a prefab's guid was not yet in this project's
+        /// database), and once the asset arrived nothing ever took it down. The object then synchronised
+        /// perfectly while a magenta ERROR sign kept claiming content was missing. Cheaper than a rescan:
+        /// it walks the marker list, not the scene.
+        /// </summary>
+        /// <summary>
+        /// Called when a prefab that was missing has arrived while its stand-in is still in the scene. The
+        /// stand-in is an empty object holding the host's transform; leaving it bare now that the asset is
+        /// here would turn a loud ERROR sign into a silently wrong object.
+        /// </summary>
+        public delegate void PrefabReady(GameObject standIn, string prefabGuid);
+
+        public static int Revalidate(PrefabReady prefabReady = null)
+        {
+            var retired = 0;
+            for (var i = Markers.Count - 1; i >= 0; i--)
+            {
+                var marker = Markers[i];
+                if (marker == null)
+                {
+                    Markers.RemoveAt(i);
+                    continue;
+                }
+
+                if (marker.owner != null && StillMissing(marker))
+                {
+                    continue;
+                }
+
+                var owner = marker.owner;
+                var reason = marker.reasonKind;
+                var guid = marker.assetGuid;
+
+                Markers.RemoveAt(i);
+
+                // A marker whose owner died has nothing left to stand in for.
+                UnityEngine.Object.DestroyImmediate(marker.gameObject);
+                retired++;
+
+                // Only an untouched stand-in is rebuilt: one that grew children has content on it, and
+                // throwing that away to re-instantiate a prefab would lose somebody's work.
+                if (prefabReady != null && owner != null && reason == ReasonPrefab
+                    && !PrefabUtility.IsPartOfPrefabInstance(owner) && owner.transform.childCount == 0)
+                {
+                    prefabReady(owner, guid);
+                }
+            }
+
+            return retired;
+        }
+
+        static bool StillMissing(CollabMissingMarker marker)
+        {
+            switch (marker.reasonKind)
+            {
+                case ReasonPrefab:
+                    return !AssetResolves(marker.assetGuid);
+                case ReasonReference:
+                    return !SubAssetResolves(marker.assetGuid, marker.localFileId);
+                case ReasonScript:
+                    if (!string.IsNullOrEmpty(marker.scriptType))
+                    {
+                        return SceneComponentFields.ResolveType(marker.scriptType) == null;
+                    }
+
+                    // The scan cannot name the type of a null component; it can only ask again whether the
+                    // object still carries one. A compile that brings the script back clears the marker.
+                    var components = marker.owner.GetComponents<Component>();
+                    for (var i = 0; i < components.Length; i++)
+                    {
+                        if (components[i] == null)
+                        {
+                            return true;
+                        }
+                    }
+
+                    return false;
+                case ReasonMesh:
+                    return CollabAssetHealth.IsMissingMeshOrMaterial(marker.owner);
+                default:
+                    // An unknown reason is not evidence that the thing arrived: leave it alone.
+                    return true;
+            }
+        }
+
+        /// <summary>
+        /// True when the guid resolves *and* the sub-asset inside it still exists. A reference token names
+        /// both; checking only the guid would retire a marker whose target was re-authored away.
+        /// </summary>
+        static bool SubAssetResolves(string guid, long localFileId)
+        {
+            if (!AssetResolves(guid))
+            {
+                return false;
+            }
+
+            if (localFileId == 0)
+            {
+                return true;
+            }
+
+            var path = AssetDatabase.GUIDToAssetPath(guid);
+            var assets = AssetDatabase.LoadAllAssetsAtPath(path);
+            for (var i = 0; i < assets.Length; i++)
+            {
+                if (assets[i] == null)
+                {
+                    continue;
+                }
+
+                string assetGuid;
+                long assetLocalId;
+                if (AssetDatabase.TryGetGUIDAndLocalFileIdentifier(assets[i], out assetGuid, out assetLocalId)
+                    && assetLocalId == localFileId)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        static bool AssetResolves(string guid)
+        {
+            if (string.IsNullOrEmpty(guid))
+            {
+                return false;
+            }
+
+            var path = AssetDatabase.GUIDToAssetPath(guid);
+            return !string.IsNullOrEmpty(path) && AssetDatabase.LoadAssetAtPath<UnityEngine.Object>(path) != null;
         }
 
         static void MoveToSceneOf(GameObject body, GameObject target)
@@ -467,5 +663,20 @@ namespace SceneCollab.Editor.SceneSync
         /// <summary>The object this stands in for. Not the parent: see the class remarks.</summary>
         [NonSerialized]
         public GameObject owner;
+
+        /// <summary>
+        /// The sub-asset id the reference token carried, when this marker is about a reference. Zero for the
+        /// other reasons.
+        /// </summary>
+        public long localFileId;
+
+        /// <summary>One of <see cref="CollabPlaceholders.ReasonPrefab"/> and friends.</summary>
+        public string reasonKind;
+
+        /// <summary>For asset-backed reasons: the guid that has to appear before this marker can go.</summary>
+        public string assetGuid;
+
+        /// <summary>For a missing script: the type name that has to become loadable.</summary>
+        public string scriptType;
     }
 }

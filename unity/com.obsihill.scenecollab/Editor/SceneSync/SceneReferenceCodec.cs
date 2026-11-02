@@ -32,6 +32,51 @@ namespace SceneCollab.Editor.SceneSync
         public const string NullToken = "ref:null";
         public const string LocalToken = "ref:local";
 
+        /// <summary>
+        /// Splits a <c>ref:&lt;guid&gt;:&lt;fileId&gt;</c> token into the asset guid and the sub-asset id.
+        ///
+        /// Both halves matter to an ERROR marker: a guid that resolves says the asset arrived, but a sub-asset
+        /// id that no longer exists (a prefab re-authored, a sprite re-imported) means the reference is still
+        /// broken. Retiring on the guid alone would hide exactly the failure markers exist to show.
+        /// </summary>
+        public static bool TryParseAssetToken(string token, out string guid, out long localFileId)
+        {
+            guid = null;
+            localFileId = 0;
+
+            if (string.IsNullOrEmpty(token) || !token.StartsWith(AssetPrefix, StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            var body = token.Substring(AssetPrefix.Length);
+            var colon = body.IndexOf(':');
+            var guidPart = colon > 0 ? body.Substring(0, colon) : body;
+            if (guidPart.Length != 32)
+            {
+                return false;
+            }
+
+            guid = guidPart;
+            if (colon > 0)
+            {
+                long.TryParse(body.Substring(colon + 1), out localFileId);
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// The asset guid inside a <c>ref:&lt;guid&gt;:&lt;fileId&gt;</c> token, or null for the other forms. Used to
+        /// remember which asset an ERROR marker is waiting for, so the marker can retire once it arrives.
+        /// </summary>
+        public static string AssetGuidOf(string token)
+        {
+            string guid;
+            long localFileId;
+            return TryParseAssetToken(token, out guid, out localFileId) ? guid : null;
+        }
+
         public static bool IsReference(string value)
         {
             return value != null

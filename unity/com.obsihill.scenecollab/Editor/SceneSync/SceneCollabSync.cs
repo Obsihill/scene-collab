@@ -38,6 +38,10 @@ namespace SceneCollab.Editor.SceneSync
 
         ISceneCollabSession _session;
         double _nextTick;
+        double _nextMarkerSweep;
+
+        /// <summary>How often markers are re-checked against the content they stand in for.</summary>
+        const double MarkerSweepSeconds = 1.0;
         bool _awaitingAck;
         bool _primed;
         bool _listening;
@@ -337,6 +341,64 @@ namespace SceneCollab.Editor.SceneSync
             }
         }
 
+        /// <summary>
+        /// Swaps an untouched stand-in for the real prefab once its asset arrives, keeping the node id, the
+        /// host's transform and the hierarchy position. Without this, retiring the marker would leave an
+        /// empty object behind — quiet instead of red, and still not what the host has.
+        /// </summary>
+        void RestorePrefabStandIn(GameObject standIn, string prefabGuid)
+        {
+            if (standIn == null)
+            {
+                return;
+            }
+
+            var path = AssetDatabase.GUIDToAssetPath(prefabGuid);
+            var prefab = string.IsNullOrEmpty(path) ? null : AssetDatabase.LoadAssetAtPath<GameObject>(path);
+            if (prefab == null)
+            {
+                return;
+            }
+
+            var parent = standIn.transform.parent;
+            var position = standIn.transform.localPosition;
+            var rotation = standIn.transform.localRotation;
+            var scale = standIn.transform.localScale;
+            var siblingIndex = standIn.transform.GetSiblingIndex();
+            var name = standIn.name;
+            var active = standIn.activeSelf;
+            var scene = standIn.scene;
+
+            string nodeId;
+            _registry.TryGetNodeId(standIn, out nodeId);
+
+            var created = PrefabUtility.InstantiatePrefab(prefab, scene) as GameObject;
+            if (created == null)
+            {
+                return;
+            }
+
+            created.name = name;
+            created.transform.SetParent(parent, false);
+            created.transform.localPosition = position;
+            created.transform.localRotation = rotation;
+            created.transform.localScale = scale;
+            created.transform.SetSiblingIndex(siblingIndex);
+            created.SetActive(active);
+
+            _registry.Forget(standIn);
+            if (!string.IsNullOrEmpty(nodeId))
+            {
+                _registry.Adopt(created, nodeId);
+                _diff.Collect(created, nodeId);
+            }
+
+            UnityEngine.Object.DestroyImmediate(standIn);
+
+            UnityEngine.Debug.Log("Scene Collab: the prefab arrived, so the stand-in for \"" + name
+                + "\" was replaced with " + path + ".");
+        }
+
         void Tick()
         {
             if (!Enabled)
@@ -344,12 +406,22 @@ namespace SceneCollab.Editor.SceneSync
                 return;
             }
 
+            var now = EditorApplication.timeSinceStartup;
+
+            // Retire stale ERROR markers even when disconnected: one hung up while an asset was importing
+            // outlives the connection, and it lies about a checkout that has already caught up. Walks the
+            // marker list, not the scene, so it can run on a slow clock.
+            if (now >= _nextMarkerSweep)
+            {
+                _nextMarkerSweep = now + MarkerSweepSeconds;
+                CollabPlaceholders.Revalidate(RestorePrefabStandIn);
+            }
+
             if (_session == null || _session.State != CollabConnectionState.Connected)
             {
                 return;
             }
 
-            var now = EditorApplication.timeSinceStartup;
             if (now < _nextTick)
             {
                 return;

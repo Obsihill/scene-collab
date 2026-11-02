@@ -168,7 +168,12 @@ namespace SceneCollab.Editor.SceneSync
                 if (SceneReferenceCodec.IsReference(op.newValue))
                 {
                     MissingReferences++;
-                    CollabPlaceholders.AttachError(gameObject, "missing ref: " + ShortPath(op.propertyPath), op.propertyPath);
+                    string refGuid;
+                    long refFileId;
+                    SceneReferenceCodec.TryParseAssetToken(op.newValue, out refGuid, out refFileId);
+
+                    CollabPlaceholders.AttachError(gameObject, "missing ref: " + ShortPath(op.propertyPath),
+                        op.propertyPath, refGuid, refFileId);
                     note = problem + " (" + ShortPath(op.propertyPath) + ")";
                     return false;
                 }
@@ -333,7 +338,8 @@ namespace SceneCollab.Editor.SceneSync
             {
                 // The stand-in is what the host's object will look like to this editor until the prefab
                 // asset arrives: a labelled placeholder rather than nothing at all.
-                var placeholder = CollabPlaceholders.AttachError(created, name + " (missing prefab)");
+                var placeholder = CollabPlaceholders.AttachPrefabError(
+                    created, name + " (missing prefab)", op.prefabGuid);
                 if (placeholder != null)
                 {
                     _touched.Add(placeholder);
@@ -466,7 +472,7 @@ namespace SceneCollab.Editor.SceneSync
                 // The script does not exist on this machine. Unity's own "Missing Script" is an empty
                 // slot that cannot be inspected, so a labelled stand-in is attached instead: it names
                 // the missing type in the hierarchy and disappears when the script arrives.
-                var stub = CollabPlaceholders.Attach(gameObject, "missing script: " + typeName);
+                var stub = CollabPlaceholders.AttachScriptError(gameObject, "missing script: " + typeName, typeName);
                 if (stub == null)
                 {
                     Ignored++;

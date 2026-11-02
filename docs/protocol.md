@@ -179,6 +179,18 @@ was a bug: a parent with a non-uniform scale stretched and displaced the marker,
 the wrong place at the wrong size. They are sized in world units from the missing object's bounds and keep
 a reference to their owner, which is what `ClearError`/`Clear` walk instead of the hierarchy.
 
+A marker is a loan, not a verdict, so it is **re-checked once a second and retired as soon as its reason
+stops holding**: a prefab or reference guid that now resolves (plus, for `ref:<guid>:<fileId>`, a sub-asset
+that still exists), a script type that now loads, a renderer whose mesh and material are back. A marker
+allowed to outlive its problem is worse than no marker — it tells a peer their checkout is broken while the
+object in front of them is complete. The scan that creates markers skips while the editor is compiling or
+importing, because in that window everything looks missing.
+
+The one case that is not simply dropped: a `(missing prefab)` stand-in is **replaced by the prefab** once
+its asset arrives, keeping its node id, name, sibling index and transform. Dropping the marker alone would
+leave an empty object behind — quiet instead of red, and still not what the host has. A stand-in that has
+grown children of its own is left alone; re-instantiating over it would destroy content somebody added.
+
 A value the codec cannot express is refused (`TryWrite` returns false) rather than approximated —
 the applier reports the rejection instead of writing a rounded number that quietly differs from the
 sender's scene.

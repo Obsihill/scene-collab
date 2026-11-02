@@ -1,3 +1,4 @@
+using UnityEditor;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 
@@ -9,8 +10,13 @@ namespace SceneCollab.Editor.SceneSync
     /// Unity's silent failures are the reason this exists: a renderer whose mesh is gone draws nothing,
     /// so a peer's object is simply not there; a script whose assembly is missing becomes an
     /// uninspectable placeholder. Both look identical to "the other person deleted it". The scan below
-    /// finds those objects and hangs a magenta marker on them, so the answer to "where did it go?" is
-    /// visible in the scene instead of in a log.
+    /// finds those objects and hangs a marker on them, so the answer to "where did it go?" is visible in
+    /// the scene instead of in a log.
+    ///
+    /// The scan is the *marking* half. Retiring a marker when the content arrives is
+    /// <see cref="CollabPlaceholders.Revalidate"/>, and skipping the scan while the editor is compiling or
+    /// importing is what stops false positives: mid-import a perfectly good prefab looks empty, and a
+    /// marker hung up in that window used to stay forever.
     /// </summary>
     public static class CollabAssetHealth
     {
@@ -30,14 +36,18 @@ namespace SceneCollab.Editor.SceneSync
         public static Report Scan(Scene scene, string[] missingGuids)
         {
             var report = new Report();
-            if (!scene.IsValid() || !scene.isLoaded)
+
+            // Compiling or importing makes every script look missing and every fresh prefab look empty.
+            // Marking then produces ERROR signs on content that is on its way in.
+            if (!scene.IsValid() || !scene.isLoaded || EditorApplication.isCompiling || EditorApplication.isUpdating)
             {
                 return report;
             }
 
             foreach (var gameObject in SceneNodeRegistry.EnumerateSceneObjects(scene))
             {
-                if (gameObject == null || gameObject.hideFlags == HideFlags.DontSave)
+                if (gameObject == null || gameObject.hideFlags == HideFlags.DontSave
+                    || CollabPlaceholders.IsPlaceholder(gameObject))
                 {
                     continue;
                 }
@@ -50,7 +60,7 @@ namespace SceneCollab.Editor.SceneSync
                     if (component == null)
                     {
                         report.MissingScripts++;
-                        if (Mark(gameObject, "missing script"))
+                        if (MarkScript(gameObject) != null)
                         {
                             report.Placeholders++;
                         }
@@ -59,35 +69,15 @@ namespace SceneCollab.Editor.SceneSync
                     }
 
                     var renderer = component as Renderer;
-                    if (renderer == null)
+                    if (renderer == null || !IsMissingMeshOrMaterial(gameObject, renderer))
                     {
                         continue;
                     }
 
-                    var meshesMissing = false;
-                    if (renderer is MeshRenderer || renderer is SkinnedMeshRenderer)
+                    report.MissingMeshes++;
+                    if (MarkMesh(gameObject) != null)
                     {
-                        meshesMissing = renderer is MeshRenderer
-                            ? gameObject.GetComponent<MeshFilter>() != null
-                              && gameObject.GetComponent<MeshFilter>().sharedMesh == null
-                            : ((SkinnedMeshRenderer)renderer).sharedMesh == null;
-
-                        // A renderer with no material renders magenta in the editor but nothing in a build;
-                        // either way the peer's object does not look like the host's.
-                        if (renderer.sharedMaterials == null || renderer.sharedMaterials.Length == 0
-                            || renderer.sharedMaterials[0] == null)
-                        {
-                            meshesMissing = true;
-                        }
-                    }
-
-                    if (meshesMissing)
-                    {
-                        report.MissingMeshes++;
-                        if (Mark(gameObject, "missing mesh or material"))
-                        {
-                            report.Placeholders++;
-                        }
+                        report.Placeholders++;
                     }
                 }
             }
@@ -95,16 +85,89 @@ namespace SceneCollab.Editor.SceneSync
             return report;
         }
 
-        static bool Mark(GameObject gameObject, string reason)
+        /// <summary>
+        /// True when this renderer has nothing to draw with: no mesh where one is expected, or no material
+        /// in the first slot. Shared with the marker refresh pass so marking and retiring use one predicate.
+        /// </summary>
+        public static bool IsMissingMeshOrMaterial(GameObject gameObject)
         {
-            // Marking is idempotent by inspection rather than by bookkeeping: a second marker under the
-            // same object would mean the scan ran twice, and the marker itself is the evidence.
-            if (CollabPlaceholders.For(gameObject).Length > 0)
+            if (gameObject == null)
             {
                 return false;
             }
 
-            return CollabPlaceholders.Attach(gameObject, reason) != null;
+            var renderers = gameObject.GetComponents<Renderer>();
+            for (var i = 0; i < renderers.Length; i++)
+            {
+                var renderer = renderers[i];
+                if (renderer != null && IsMissingMeshOrMaterial(gameObject, renderer))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        static bool IsMissingMeshOrMaterial(GameObject gameObject, Renderer renderer)
+        {
+            // Only the renderer types that carry a mesh/ material pair of their own. A ParticleSystemRenderer
+            // without a material is a different (and legitimate) state.
+            if (!(renderer is MeshRenderer) && !(renderer is SkinnedMeshRenderer))
+            {
+                return false;
+            }
+
+            if (renderer is SkinnedMeshRenderer)
+            {
+                if (((SkinnedMeshRenderer)renderer).sharedMesh == null)
+                {
+                    return true;
+                }
+            }
+            else
+            {
+                var filter = gameObject.GetComponent<MeshFilter>();
+                if (filter != null && filter.sharedMesh == null)
+                {
+                    return true;
+                }
+            }
+
+            // A renderer with no material renders magenta in the editor but nothing in a build; either way
+            // the peer's object does not look like the host's.
+            var materials = renderer.sharedMaterials;
+            return materials == null || materials.Length == 0 || materials[0] == null;
+        }
+
+        static GameObject MarkMesh(GameObject gameObject)
+        {
+            if (CollabPlaceholders.For(gameObject).Length > 0)
+            {
+                return null;
+            }
+
+            return CollabPlaceholders.AttachMeshError(gameObject, "missing mesh or material");
+        }
+
+        static GameObject MarkScript(GameObject gameObject)
+        {
+            // Marking is idempotent by inspection rather than by bookkeeping: a second marker for the same
+            // object would mean the scan ran twice, and the marker itself is the evidence.
+            if (CollabPlaceholders.For(gameObject).Length > 0)
+            {
+                return null;
+            }
+
+            // The type name is not knowable here — Unity hands back a null component and nothing else — so
+            // this marker re-checks "does this object still have an unresolvable component" instead.
+            return CollabPlaceholders.AttachScriptError(gameObject, "missing script", null);
+        }
+
+        /// <summary>Retires markers whose content has since arrived. Cheap enough to call on a timer.</summary>
+        public static int Revalidate()
+        {
+            return CollabPlaceholders.Revalidate();
         }
     }
 }

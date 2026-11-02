@@ -5,6 +5,32 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.3] — 2026-11-02
+
+### Fixed
+
+- **ERROR markers retire when the thing they complained about arrives.** Marking used to be one-way: a
+  marker hung up while a prefab was still importing (or before this project's asset database knew its
+  guid) stayed in the scene after the asset arrived, so a prefab that synchronised perfectly still carried
+  a magenta ERROR sign. Markers are now re-checked once a second against their own reason — a prefab or
+  reference guid that resolves, a script type that loads, a renderer whose mesh and material are back — and
+  removed the moment the reason no longer holds. Orphans of objects that no longer exist go too.
+- **The health scan no longer runs mid-compile or mid-import.** In that window every script looks missing
+  and every freshly pulled prefab looks empty, which is precisely when false markers were being created.
+  It also only judges `MeshRenderer`/`SkinnedMeshRenderer`, because a particle or trail renderer without a
+  material is a legitimate state, not a broken checkout.
+- **A stand-in is replaced by the real prefab when the asset arrives.** Previously nothing converted it:
+  the object stayed an empty GameObject holding the host's transform. If the stand-in is still untouched
+  (no children of its own) it is now swapped for an instance of the prefab, keeping its node id, name,
+  hierarchy position and transform; a stand-in that grew content is left alone so nobody's work is thrown
+  away.
+
+### Added
+
+- **Reference markers remember the sub-asset id.** A `ref:<guid>:<fileId>` token names both halves, so a
+  marker whose guid resolves but whose sub-asset was re-authored away keeps its sign instead of quietly
+  disappearing — retiring on the guid alone would hide the very failure markers exist to show.
+
 ## [0.5.2] — 2026-11-02
 
 ### Fixed
