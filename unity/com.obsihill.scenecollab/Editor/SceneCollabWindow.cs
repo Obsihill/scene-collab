@@ -296,7 +296,7 @@ namespace SceneCollab.Editor
 
                 if (!string.IsNullOrEmpty(_sync.AssetNote))
                 {
-                    EditorGUILayout.HelpBox(_sync.AssetNote + " — magenta boxes mark what this "
+                    EditorGUILayout.HelpBox(_sync.AssetNote + " — ERROR signs mark what this "
                         + "checkout cannot resolve. They are not saved. The reason is in each box's "
                         + "name (" + SceneCollab.Editor.SceneSync.CollabPlaceholders.MarkerName
                         + " …) in the hierarchy.", MessageType.Warning);
@@ -450,7 +450,7 @@ namespace SceneCollab.Editor
 
         /// <summary>
         /// The prefab drawn at a missing object's place. Stored as an asset path, because the settings file is
-        /// JSON and JSON cannot hold a reference. Empty falls back to the built-in magenta cube.
+        /// JSON and JSON cannot hold a reference. Empty falls back to the built-in ERROR sign.
         /// </summary>
         static string ErrorModelField(string current)
         {

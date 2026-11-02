@@ -169,7 +169,7 @@ An object reference is an identity, not a value, so it travels as one of:
 | `ref:local` | exists only on the sender (not an asset, not in the session) | not resolvable — reported, never guessed |
 
 A reference that cannot be resolved does not become an empty slot. The applier leaves an **ERROR
-marker** at the missing object's place (an emissive magenta cube by default; a project prefab when
+marker** at the missing object's place (a painted ERROR sign by default; a project prefab when
 `ERROR model` is set in the window), counts it in `MissingReference`, and shows the count in the window.
 An empty material slot looks like a deliberate choice; a glowing ERROR box looks like what it is — a
 checkout that is missing content.

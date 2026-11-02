@@ -5,6 +5,24 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.4] — 2026-11-02
+
+### Changed
+
+- **The default stand-in is a painted ERROR sign, not a magenta cube.** The cube was debug art that
+  survived into releases: it marked *something* as wrong without saying what, and a bare magenta box in a
+  level reads as a missing prop. What you get now is the sign the idea comes from — magenta and black
+  chequerboard, the word ERROR in red with a dark outline — drawn from a texture the package generates at
+  runtime, so no third-party art ships and the MIT licence stays clean. Two boards are crossed at right
+  angles and textured on both sides: four faces, so the sign reads from any direction and never turns to
+  face the camera (v0.5.1 removed camera-facing labels, and that decision stands).
+- **The lettering keeps its 2:1 shape whatever the object's proportions.** A flat slab or a tall pillar
+  would otherwise stretch the board into an unreadable smear, so the faces compensate against the bounds
+  the marker is scaled to.
+- `Tools ▸ Scene Collab ▸ ERROR model` still wins when it is set — a project with its own placeholder
+  prefab (a scanned Half-Life style sign, say) is unaffected. The slot now means *instead of* the built-in
+  sign rather than *instead of a cube*.
+
 ## [0.5.3] — 2026-11-02
 
 ### Fixed

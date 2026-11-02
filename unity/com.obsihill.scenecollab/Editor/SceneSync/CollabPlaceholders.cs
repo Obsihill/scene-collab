@@ -15,9 +15,9 @@ namespace SceneCollab.Editor.SceneSync
     /// their checkout is incomplete.
     ///
     /// So a missing thing does not render as nothing here: it renders as a bright stand-in sitting exactly
-    /// where the missing object would have been. By default that is an emissive magenta cube; a project can
-    /// point <see cref="CollabSettings.errorModelPath"/> at its own placeholder prefab (the Half-Life style
-    /// ERROR sign, say) and that is used instead.
+    /// where the missing object would have been. By default that is a chequerboard ERROR sign drawn from a
+    /// generated texture (see <see cref="BuildErrorSign"/>); a project can point
+    /// <see cref="CollabSettings.errorModelPath"/> at its own placeholder prefab and that is used instead.
     ///
     /// Two rules the shape of this class follows:
     ///
@@ -47,6 +47,9 @@ namespace SceneCollab.Editor.SceneSync
         static readonly Color ErrorColor = new Color(1f, 0.05f, 0.75f, 1f);
 
         static Material _material;
+        static Material _signMaterial;
+        static Mesh _signMesh;
+        static Texture2D _signTexture;
 
         /// <summary>Every live marker, so a revert can drop them without scanning the scene.</summary>
         static readonly List<CollabMissingMarker> Markers = new List<CollabMissingMarker>();
@@ -57,7 +60,7 @@ namespace SceneCollab.Editor.SceneSync
             var body = BuildErrorModel(label);
             if (body == null)
             {
-                body = BuildCube(label);
+                body = BuildErrorSign(label);
             }
 
             if (body == null)
@@ -76,6 +79,15 @@ namespace SceneCollab.Editor.SceneSync
             }
 
             body.transform.localScale = size;
+
+            // The sign's board is scaled by the object's bounds, which would stretch its lettering out of
+            // shape on a long, thin or flat target. The faces compensate so the word stays 2:1 read-able.
+            var sign = body.GetComponent<CollabErrorSign>();
+            if (sign != null)
+            {
+                sign.Fit(size);
+            }
+
             return body;
         }
 
@@ -473,24 +485,241 @@ namespace SceneCollab.Editor.SceneSync
             return bounds;
         }
 
-        static GameObject BuildCube(string label)
+        /// <summary>
+        /// The built-in stand-in: a Half-Life style ERROR sign — magenta/black chequerboard with the word
+        /// painted on it, readable from either side.
+        ///
+        /// It is drawn here, from a texture this assembly generates, rather than shipped as a model file:
+        /// the sign everybody recognises is Valve's, so it cannot be redistributed, and a binary asset in a
+        /// public package would be somebody else's art with no licence attached. Generating it costs about
+        /// a hundred lines and no legal risk, and a project that has its own placeholder prefab still wins
+        /// through <see cref="CollabSettings.errorModelPath"/>.
+        /// </summary>
+        static GameObject BuildErrorSign(string label)
         {
-            var box = GameObject.CreatePrimitive(PrimitiveType.Cube);
-            if (box == null)
+            var root = new GameObject("SceneCollab Error Sign");
+            root.hideFlags = HideFlags.DontSave;
+
+            // Two boards crossed at right angles, each textured on both sides: a single flat sign turns
+            // edge-on and disappears exactly when somebody orbits the scene view to look at the gap it
+            // marks. Four faces read from any horizontal direction and still never turn to face the camera.
+            var material = SignMaterial();
+            var mesh = SignMesh();
+            var sign = root.AddComponent<CollabErrorSign>();
+            sign.faces = new[]
             {
-                return null;
+                AddFace(root, "face", mesh, material, 0f),
+                AddFace(root, "face.back", mesh, material, 180f),
+                AddFace(root, "face.left", mesh, material, 90f),
+                AddFace(root, "face.right", mesh, material, 270f),
+            };
+
+            return root;
+        }
+
+        static Transform AddFace(GameObject root, string name, Mesh mesh, Material material, float yaw)
+        {
+            var face = new GameObject(name);
+            face.hideFlags = HideFlags.DontSave;
+            face.transform.SetParent(root.transform, false);
+            face.transform.localRotation = Quaternion.Euler(0f, yaw, 0f);
+
+            var filter = face.AddComponent<MeshFilter>();
+            filter.sharedMesh = mesh;
+            filter.hideFlags = HideFlags.DontSave;
+
+            var renderer = face.AddComponent<MeshRenderer>();
+            renderer.sharedMaterial = material;
+            renderer.hideFlags = HideFlags.DontSave;
+            renderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            renderer.receiveShadows = false;
+            return face.transform;
+        }
+
+        /// <summary>A unit quad in the XY plane, facing -Z. Cached: every marker shares one mesh.</summary>
+        static Mesh SignMesh()
+        {
+            if (_signMesh != null)
+            {
+                return _signMesh;
             }
 
-            var renderer = box.GetComponent<MeshRenderer>();
-            if (renderer != null)
+            var mesh = new Mesh();
+            mesh.name = "SceneCollab Error Sign";
+            mesh.hideFlags = HideFlags.DontSave;
+            mesh.vertices = new[]
             {
-                renderer.sharedMaterial = ErrorMaterial();
-                renderer.hideFlags = HideFlags.DontSave;
-                renderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
-                renderer.receiveShadows = false;
+                new Vector3(-0.5f, -0.5f, 0f),
+                new Vector3(0.5f, -0.5f, 0f),
+                new Vector3(0.5f, 0.5f, 0f),
+                new Vector3(-0.5f, 0.5f, 0f),
+            };
+            mesh.uv = new[]
+            {
+                new Vector2(0f, 0f),
+                new Vector2(1f, 0f),
+                new Vector2(1f, 1f),
+                new Vector2(0f, 1f),
+            };
+            mesh.normals = new[] { Vector3.back, Vector3.back, Vector3.back, Vector3.back };
+            mesh.triangles = new[] { 0, 2, 1, 0, 3, 2 };
+            mesh.RecalculateBounds();
+            _signMesh = mesh;
+            return mesh;
+        }
+
+        static Material SignMaterial()
+        {
+            if (_signMaterial != null)
+            {
+                return _signMaterial;
             }
 
-            return box;
+            // Unlit on purpose: the sign has to look identical in a dark level, in URP and in built-in, and
+            // a lit material would let a lamp make "something is missing" look like furniture.
+            var shader = Shader.Find("Universal Render Pipeline/Unlit");
+            if (shader == null)
+            {
+                shader = Shader.Find("Unlit/Texture");
+            }
+
+            if (shader == null)
+            {
+                shader = Shader.Find("Sprites/Default");
+            }
+
+            if (shader == null)
+            {
+                return ErrorMaterial();
+            }
+
+            var material = new Material(shader);
+            material.name = "SceneCollab Error Sign (unlit)";
+            material.hideFlags = HideFlags.DontSave;
+
+            var texture = SignTexture();
+            if (material.HasProperty("_BaseMap"))
+            {
+                material.SetTexture("_BaseMap", texture);
+            }
+
+            if (material.HasProperty("_MainTex"))
+            {
+                material.SetTexture("_MainTex", texture);
+            }
+
+            material.globalIlluminationFlags = MaterialGlobalIlluminationFlags.None;
+            _signMaterial = material;
+            return material;
+        }
+
+        /// <summary>
+        /// Paints the sign: chequerboard background, then ERROR in red with a dark outline so the word still
+        /// reads over the bright squares. Point filtered and clamped, because it is nine-pixel font work.
+        /// </summary>
+        static Texture2D SignTexture()
+        {
+            if (_signTexture != null)
+            {
+                return _signTexture;
+            }
+
+            const int width = 256;
+            const int height = 128;
+            const int cell = 16;
+
+            var bright = new Color32(150, 8, 104, 255);
+            var dark = new Color32(24, 4, 18, 255);
+            var pixels = new Color32[width * height];
+            for (var y = 0; y < height; y++)
+            {
+                for (var x = 0; x < width; x++)
+                {
+                    pixels[(y * width) + x] = (((x / cell) + (y / cell)) & 1) == 0 ? bright : dark;
+                }
+            }
+
+            // "ERROR", five glyphs of 5x7, eight pixels a cell: 232 wide, 56 tall, centred.
+            const string word = "ERROR";
+            const int scale = 8;
+            const int glyphWidth = 5;
+            const int glyphHeight = 7;
+            var wordWidth = ((word.Length * glyphWidth) + (word.Length - 1)) * scale;
+            var originX = (width - wordWidth) / 2;
+            var originY = (height - (glyphHeight * scale)) / 2;
+
+            var outline = new Color32(10, 10, 10, 255);
+            var ink = new Color32(255, 32, 32, 255);
+            for (var pass = 0; pass < 2; pass++)
+            {
+                var color = pass == 0 ? outline : ink;
+                var grow = pass == 0 ? 1 : 0;
+                for (var i = 0; i < word.Length; i++)
+                {
+                    var rows = Glyph(word[i]);
+                    var glyphX = originX + (i * (glyphWidth + 1) * scale);
+                    for (var row = 0; row < glyphHeight; row++)
+                    {
+                        for (var column = 0; column < glyphWidth; column++)
+                        {
+                            if (rows[row][column] != '1')
+                            {
+                                continue;
+                            }
+
+                            var x0 = glyphX + (column * scale) - grow;
+                            var y0 = height - originY - ((row + 1) * scale) - grow;
+                            Fill(pixels, width, height, x0, y0, scale + (grow * 2), scale + (grow * 2), color);
+                        }
+                    }
+                }
+            }
+
+            var texture = new Texture2D(width, height, TextureFormat.RGBA32, false);
+            texture.name = "SceneCollab Error Sign";
+            texture.hideFlags = HideFlags.DontSave;
+            texture.filterMode = FilterMode.Point;
+            texture.wrapMode = TextureWrapMode.Clamp;
+            texture.SetPixels32(pixels);
+            texture.Apply(false, false);
+            _signTexture = texture;
+            return texture;
+        }
+
+        static void Fill(Color32[] pixels, int width, int height, int x0, int y0, int w, int h, Color32 color)
+        {
+            for (var y = y0; y < y0 + h; y++)
+            {
+                if (y < 0 || y >= height)
+                {
+                    continue;
+                }
+
+                for (var x = x0; x < x0 + w; x++)
+                {
+                    if (x < 0 || x >= width)
+                    {
+                        continue;
+                    }
+
+                    pixels[(y * width) + x] = color;
+                }
+            }
+        }
+
+        static string[] Glyph(char letter)
+        {
+            switch (letter)
+            {
+                case 'E':
+                    return new[] { "11111", "10000", "10000", "11110", "10000", "10000", "11111" };
+                case 'R':
+                    return new[] { "11110", "10001", "10001", "11110", "10100", "10010", "10001" };
+                case 'O':
+                    return new[] { "01110", "10001", "10001", "10001", "10001", "10001", "01110" };
+                default:
+                    return new[] { "00000", "00000", "00000", "00000", "00000", "00000", "00000" };
+            }
         }
 
         /// <summary>
@@ -645,6 +874,43 @@ namespace SceneCollab.Editor.SceneSync
         public static string Describe(int missingAssets, int missingScripts)
         {
             return Describe(missingAssets, missingScripts, 0);
+        }
+    }
+
+    /// <summary>
+    /// The crossed boards of a built-in ERROR sign. They carry no data — the component exists so the marker
+    /// can keep the lettering 2:1 whatever proportions the object it stands in for happens to have.
+    /// </summary>
+    public sealed class CollabErrorSign : MonoBehaviour
+    {
+        [NonSerialized]
+        public Transform[] faces;
+
+        public void Fit(Vector3 size)
+        {
+            var tallest = Mathf.Max(size.x, Mathf.Max(size.y, size.z));
+            if (tallest <= 0f || faces == null)
+            {
+                return;
+            }
+
+            // Tall and thin gets a board as wide as the footprint; a flat slab gets one as tall as its
+            // thickness. Either way the word is never squashed past reading.
+            var footprint = Mathf.Max(size.x, size.z);
+            var height = Mathf.Clamp(Mathf.Min(footprint, size.y), tallest * 0.25f, tallest);
+            var width = height * 2f;
+            var scale = new Vector3(
+                size.x > 1e-5f ? width / size.x : 1f,
+                size.y > 1e-5f ? height / size.y : 1f,
+                1f);
+
+            for (var i = 0; i < faces.Length; i++)
+            {
+                if (faces[i] != null)
+                {
+                    faces[i].localScale = scale;
+                }
+            }
         }
     }
 

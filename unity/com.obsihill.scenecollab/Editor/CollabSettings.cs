@@ -30,7 +30,7 @@ namespace SceneCollab.Editor
 
         /// <summary>
         /// Optional prefab used as the body of an ERROR marker, as a project-relative asset path (JSON cannot
-        /// hold object references). Empty means the built-in magenta cube. Point this at whatever your project
+        /// hold object references). Empty means the built-in painted ERROR sign. Point this at whatever your project
         /// considers an obviously-missing placeholder — the package itself ships no third-party art.
         /// </summary>
         public string errorModelPath = "";
