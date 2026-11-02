@@ -111,6 +111,15 @@ namespace SceneCollab.Editor
         /// <summary>A peer's scene-view camera pose (v0.4.3), for the scene-view overlay.</summary>
         event Action<WireMessage> ViewReceived;
 
+        /// <summary>
+        /// Sends one rectangle of terrain samples (v0.5). Terrain data lives in a TerrainData asset,
+        /// not in the scene, so it rides its own channel instead of the op log.
+        /// </summary>
+        bool SendTerrain(WireMessage patch);
+
+        /// <summary>A terrain patch from the host (v0.5).</summary>
+        event Action<WireMessage> TerrainReceived;
+
         /// <summary>Tells the room how many assets the host's scene needs (host only).</summary>
         bool PublishAssetCount(int count);
 

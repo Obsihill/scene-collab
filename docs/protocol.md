@@ -237,6 +237,32 @@ never replayed, so a peer camera cannot advance or corrupt the document. Clients
 only when the pose actually changed; a receiver drops a peer camera after 5 s of silence. Poses are
 drawn as an editor overlay (`HideFlags.DontSave`) — they are not scene objects and are never saved.
 
+## Terrain
+
+```
+host → terrain { type, sceneGuid, terrainGuid, terrainKind, terrainResolution, terrainLayers,
+                 terrainX, terrainZ, terrainWidth, terrainHeight, terrainPayload }
+server → terrain (to every other participant in the room)
+```
+
+Heights and splat weights live in a `TerrainData` **asset**, not in the scene: the scene component only
+holds a reference, and that reference does not change when someone sculpts. So a terrain edit produces
+no op at all — the diff is right to report "nothing changed". Patches travel on this channel instead.
+
+- `terrainKind` is `height` or `splat`. `terrainResolution` is the heightmap resolution for a height
+  patch and the alphamap resolution for a splat patch. A receiver whose terrain has a different
+  resolution or layer count **refuses** the patch and reports it: writing 1024 samples into a
+  512-sample terrain corrupts the asset instead of degrading it.
+- `terrainPayload` is base64 — row-major little-endian **16-bit** heights (`1/65535` of full scale) for
+  `height`, one **byte per weight** for `splat`. One patch covers at most 128×128 height samples (32 KB
+  raw, ~44 KB encoded) or 64×64 splat samples; a wider stroke arrives as several tiles, and the tile
+  shrinks automatically when a terrain has many layers.
+- The host is the only writer; the server answers `not_host` to anyone else. Guests apply, mark the
+  TerrainData dirty, and never save it — the host owns the asset exactly as it owns the scene.
+- The message carries no `revision` and never enters the op log. A tile is superseded by the next one,
+  and terrain traffic must not make every scene op look stale.
+- Trees, details and terrain holes are not on this channel yet.
+
 ## Room listing
 
 `GET /rooms` returns what a client needs to pick a session, and nothing more:

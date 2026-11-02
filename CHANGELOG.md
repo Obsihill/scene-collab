@@ -5,6 +5,30 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] — 2026-11-02
+
+### Added
+
+- **Terrain heights and splat weights sync.** Sculpting or painting a terrain used to sync nothing at
+  all — and it was not a bug in the diff, it was the diff being right: heights and splat weights live in
+  a `TerrainData` **asset**, and the scene component only holds a reference to it, so a sculpt changes no
+  scene field and produces no op. Terrain now travels on its own `terrain` channel as stroke-sized region
+  patches: a 128×128 tile of 16-bit heights (32 KB) or a 64×64 tile of per-layer byte weights, shrunk
+  automatically when a terrain carries many layers. A patch never enters the op log, never consumes a
+  revision, and is superseded by the next one.
+- **The host is the only sculptor.** The server answers `not_host` to anyone else, matching the rule
+  that the host owns the asset exactly as it owns the scene: a guest applies the patch, marks the
+  TerrainData dirty, and never saves it. Two editors both sculpting a copy they cannot both persist
+  would otherwise overwrite each other forever.
+- **A mismatched terrain refuses the patch.** A receiver whose heightmap resolution, alphamap resolution
+  or layer count differs reports it in the window instead of writing 1024 samples into a 512-sample
+  layer — that corrupts the asset rather than degrading it.
+
+### Not in this release
+
+- Terrain **trees**, **details** and **holes** are not on the channel yet.
+- No terrain lock: the host is the only writer, so there is nothing to lock.
+
 ## [0.4.7] — 2026-11-01
 
 ### Added

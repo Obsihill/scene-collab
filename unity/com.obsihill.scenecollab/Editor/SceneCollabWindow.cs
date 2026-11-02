@@ -252,6 +252,27 @@ namespace SceneCollab.Editor
                     EditorGUILayout.LabelField(_sync.Presence.PeerCount + " camera(s)", GUILayout.Width(90f));
                 }
 
+                if (_sync.Terrain.KnownTerrains > 0)
+                {
+                    // Terrain is host-authoritative and rides its own channel, so the honest thing to show
+                    // is which side of that rule this editor is on.
+                    var terrain = _sync.Terrain;
+                    var host = _session != null && _session.IsHost;
+                    EditorGUILayout.LabelField("Terrain",
+                        terrain.KnownTerrains + " terrain(s) — "
+                        + (host
+                            ? "sculpting is live (" + terrain.Sent + " patch(es) sent)"
+                            : "read-only, the host sculpts (" + terrain.Applied + " patch(es) applied)"));
+                }
+
+                if (_sync.Terrain.Skipped > 0)
+                {
+                    EditorGUILayout.HelpBox(
+                        _sync.Terrain.Skipped + " terrain patch(es) could not be applied"
+                        + (string.IsNullOrEmpty(_sync.Terrain.LastNote) ? "." : ": " + _sync.Terrain.LastNote + "."),
+                        MessageType.Warning);
+                }
+
                 if (connected)
                 {
                     using (new EditorGUILayout.HorizontalScope())

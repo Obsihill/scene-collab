@@ -25,6 +25,13 @@ namespace SceneCollab.Contracts.Protocol
         /// to the op history: looking around is not an edit, so it must not advance the revision.
         /// </summary>
         public const string View = "view";
+
+        /// <summary>
+        /// Rectangle of terrain samples (v0.5). Broadcast like <c>view</c> — outside the op log,
+        /// because terrain data is an asset, not a scene node, and one sculpt stroke can be dozens of
+        /// tiles that must not each cost a revision.
+        /// </summary>
+        public const string Terrain = "terrain";
     }
 
     /// <summary>Values for <see cref="WireMessage.code"/>.</summary>

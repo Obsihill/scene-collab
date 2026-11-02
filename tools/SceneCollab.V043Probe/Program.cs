@@ -333,6 +333,65 @@ Check("the reference token survives the relay",
 Check("the component type survives the relay", identityAtGuest?.componentType == "UnityEngine.AudioSource",
     identityAtGuest?.componentType ?? "(null)");
 
+// 10. v0.5: a terrain patch is relayed verbatim, and only the host may send one. Terrain is an asset,
+//     not a scene node, so it never enters the op log — the fields have to survive a re-serialise just
+//     as the op fields above do, and the revision must not move.
+var terrainGuid = "1111222233334444555566667777888a";
+var terrainPayload = Convert.ToBase64String(Enumerable.Range(0, 16 * 16 * 2).Select(i => (byte)(i * 7)).ToArray());
+var terrainRevisionBefore = host.Revision;
+
+await host.SendAsync(new WireMessage
+{
+    type = MessageTypes.Terrain,
+    protocolVersion = ProtocolVersion.Current,
+    terrainValid = true,
+    terrainKind = "height",
+    terrainGuid = terrainGuid,
+    terrainResolution = 513,
+    terrainX = 32,
+    terrainZ = 48,
+    terrainWidth = 16,
+    terrainHeight = 16,
+    terrainPayload = terrainPayload,
+    revision = host.Revision,
+});
+
+var terrainAtGuest = await guest.NextAsync(m => m.type == MessageTypes.Terrain, 5000);
+Check("a terrain tile reaches the other editor", terrainAtGuest != null);
+Check("the terrain payload survives the relay byte for byte",
+    terrainAtGuest?.terrainPayload == terrainPayload, "bytes=" + (terrainAtGuest?.terrainPayload?.Length ?? 0));
+Check("the terrain rectangle, kind and asset guid survive the relay",
+    terrainAtGuest is { terrainKind: "height", terrainX: 32, terrainZ: 48, terrainWidth: 16, terrainHeight: 16 }
+    && terrainAtGuest.terrainGuid == terrainGuid && terrainAtGuest.terrainResolution == 513,
+    "kind=" + (terrainAtGuest?.terrainKind ?? "(null)") + " rect=" + (terrainAtGuest?.terrainX.ToString() ?? "?")
+    + "," + (terrainAtGuest?.terrainZ.ToString() ?? "?") + " " + (terrainAtGuest?.terrainWidth.ToString() ?? "?")
+    + "x" + (terrainAtGuest?.terrainHeight.ToString() ?? "?"));
+Check("a terrain tile does not move the revision", host.Revision == terrainRevisionBefore,
+    "revision=" + host.Revision + " before=" + terrainRevisionBefore);
+
+await guest.SendAsync(new WireMessage
+{
+    type = MessageTypes.Terrain,
+    protocolVersion = ProtocolVersion.Current,
+    terrainValid = true,
+    terrainKind = "height",
+    terrainGuid = terrainGuid,
+    terrainResolution = 513,
+    terrainX = 0,
+    terrainZ = 0,
+    terrainWidth = 16,
+    terrainHeight = 16,
+    terrainPayload = terrainPayload,
+    revision = guest.Revision,
+});
+
+var guestTerrainError = await guest.NextAsync(m => m.type == MessageTypes.Error, 5000);
+Check("a guest may not sculpt", guestTerrainError?.code == ErrorCodes.NotHost,
+    "code=" + (guestTerrainError?.code ?? "(none)"));
+
+var refusedAtHost = await host.NextAsync(m => m.type == MessageTypes.Terrain, 1500);
+Check("the refused tile is not relayed", refusedAtHost == null);
+
 Directory.CreateDirectory(Path.GetDirectoryName(outPath)!);
 await File.WriteAllTextAsync(outPath, JsonSerializer.Serialize(new
 {

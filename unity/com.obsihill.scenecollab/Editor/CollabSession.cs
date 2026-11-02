@@ -110,6 +110,9 @@ namespace SceneCollab.Editor
 
         /// <summary>A peer's scene-view camera pose. Drawn as an overlay; never applied to the scene.</summary>
         public event Action<WireMessage> ViewReceived;
+
+        /// <summary>A terrain patch from the host (v0.5). Applies to a TerrainData asset, not a node.</summary>
+        public event Action<WireMessage> TerrainReceived;
         public event Action<string, string> ErrorReceived;
         public event Action LocksChanged;
         public event Action<int> AssetCountChanged;
@@ -284,6 +287,27 @@ namespace SceneCollab.Editor
                 viewRotW = rotW,
                 viewFov = fov,
             });
+            return true;
+        }
+
+        /// <summary>
+        /// Sends one rectangle of terrain samples (v0.5). Fire-and-forget: a tile is small, always
+        /// superseded by the next stroke tile, and never part of the op log.
+        /// </summary>
+        public bool SendTerrain(WireMessage patch)
+        {
+            if (State != CollabConnectionState.Connected || patch == null)
+            {
+                return false;
+            }
+
+            patch.type = MessageTypes.Terrain;
+            patch.clientId = ClientId;
+            patch.room = RoomName;
+            patch.displayName = _displayName;
+            patch.sceneGuid = SceneGuid;
+            patch.terrainValid = true;
+            Send(patch);
             return true;
         }
 
@@ -783,6 +807,17 @@ namespace SceneCollab.Editor
                     if (viewHandler != null)
                     {
                         viewHandler(message);
+                    }
+
+                    break;
+
+                case MessageTypes.Terrain:
+                    // Terrain lives in an asset, not in the scene: patches never touch the revision and
+                    // ride their own channel. Applying them is TerrainSync's job.
+                    var terrainHandler = TerrainReceived;
+                    if (terrainHandler != null)
+                    {
+                        terrainHandler(message);
                     }
 
                     break;

@@ -167,6 +167,45 @@ namespace SceneCollab.Contracts.Protocol
         /// replace values and must not read as a conflict.
         /// </summary>
         public bool snapshot;
+
+        // ── v0.5: terrain patches ────────────────────────────────────────────────
+        //
+        // A terrain's heights and splat weights live in a TerrainData *asset*, not in the scene, so
+        // they never appear in an op. They travel on this separate message instead, one rectangle of
+        // samples at a time. See <c>TerrainPatchCodec</c> for the payload layout and <c>TerrainSync</c>
+        // for who is allowed to write.
+
+        /// <summary>True when a <c>terrain</c> message carries a complete patch.</summary>
+        public bool terrainValid;
+
+        /// <summary><c>height</c> or <c>splat</c>.</summary>
+        public string terrainKind;
+
+        /// <summary>Asset GUID of the TerrainData being patched. GUIDs, never paths.</summary>
+        public string terrainGuid;
+
+        /// <summary>
+        /// Sample resolution of the map the rectangle refers to: heightmap resolution for
+        /// <c>height</c>, alphamap resolution for <c>splat</c>. A mismatch is refused rather than
+        /// applied, because writing a 1024-sample patch into a 512-sample terrain corrupts it.
+        /// </summary>
+        public int terrainResolution;
+
+        /// <summary>Alphamap layer count; zero for height patches.</summary>
+        public int terrainLayers;
+
+        /// <summary>Left edge of the patched rectangle, in samples.</summary>
+        public int terrainX;
+
+        /// <summary>Bottom edge of the patched rectangle, in samples.</summary>
+        public int terrainZ;
+
+        public int terrainWidth;
+
+        public int terrainHeight;
+
+        /// <summary>Base64 payload: 16-bit rows for heights, one byte per weight for splats.</summary>
+        public string terrainPayload;
     }
 
     /// <summary>

@@ -32,7 +32,8 @@ locked so two people cannot fight over the same GameObject.
 | Late joiner: host streams the full scene as a chunked snapshot | done |
 | Prefab instance overrides (`set_prefab_override` promotion) | done |
 | Peer scene-view cameras (editor overlay, `view` messages) | done |
-| `TerrainData`, prefab-instance structural edits | not yet — see [roadmap](#roadmap) |
+| Terrain heightmap + splatmap (host-authoritative region patches) | done (v0.5) |
+| Prefab-instance structural edits (`addedObjects`), terrain trees/details/holes | not yet — see [roadmap](#roadmap) |
 
 Verified end to end, not by unit tests alone:
 
@@ -52,7 +53,7 @@ Verified end to end, not by unit tests alone:
 `Packages/manifest.json`:
 
 ```jsonc
-"com.obsihill.scenecollab": "https://github.com/Obsihill/scene-collab.git?path=unity/com.obsihill.scenecollab#v0.4.7"
+"com.obsihill.scenecollab": "https://github.com/Obsihill/scene-collab.git?path=unity/com.obsihill.scenecollab#v0.5.0"
 ```
 
 Then `Tools > Scene Collab`. Requires Unity **6000.0 or newer**.
@@ -109,7 +110,8 @@ that node's lock. Any participant may restructure — but only the host can save
 | Restoring a field to the prefab's default | **no** | the override is removed locally without an op, so a peer keeps the old override |
 | Joining after the session started | yes | the host streams its whole scene as a snapshot; the joiner ends up with the host's scene, not a merge |
 | Add / remove a component *of a prefab instance* | **no** | the instance's `addedObjects` list is not carried |
-| Terrain heightmap / splatmap / trees / details | **no** | terrain stays host-only, v0.5 |
+| Terrain heightmap / splatmap | **yes**, host-only | stroke-sized region patches on their own channel: 16-bit height tiles, byte splat tiles; a guest whose resolution or layer count differs refuses the patch and says so |
+| Terrain trees / details / holes | **no** | not on the channel yet |
 | Materials and other **assets** | **no** | shared through Git, by design |
 | Lightmap bake, NavMesh bake, terrain LOD | **no** | host bakes and saves, then Git |
 | More than one scene per session | **no** | one active scene; a different scene GUID is refused |
@@ -200,8 +202,9 @@ in `Packages/manifest.json`:
 6. **v0.4.5** — 20 s heartbeats both ways, dead peers hung up on after 60 s, automatic reconnect. ✅
 7. **v0.4.4** — abandoned rooms are dropped when the last participant leaves. ✅
 8. **v0.4.3** — late-joiner snapshot, prefab override promotion, peer scene-view cameras.
-6. **v0.5** — `samples~` demo scene, prefab-instance structural edits (`addedObjects`), `TerrainData`
-   delta channel (stroke-sized region deltas, terrain lock).
+6. **v0.5** — terrain: heightmap and splatmap region deltas over a dedicated channel. ✅ (trees,
+   details, holes and a terrain lock are still open)
+7. **v0.5.x** — `samples~` demo scene, prefab-instance structural edits (`addedObjects`).
 7. **v1.0** — first-run wizard (Lv1 host mode: server spawned locally, 6-digit code).
 
 ## License

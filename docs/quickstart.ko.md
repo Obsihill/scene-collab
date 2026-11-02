@@ -62,7 +62,7 @@ Nginx Proxy Manager 예시:
 `Packages/manifest.json`에 한 줄 추가:
 
 ```jsonc
-"com.obsihill.scenecollab": "https://github.com/Obsihill/scene-collab.git?path=unity/com.obsihill.scenecollab#v0.4.7"
+"com.obsihill.scenecollab": "https://github.com/Obsihill/scene-collab.git?path=unity/com.obsihill.scenecollab#v0.5.0"
 ```
 
 Unity가 패키지를 받아오면 메뉴에 **Tools > Scene Collab** 이 생깁니다.
@@ -132,7 +132,8 @@ Guest = 같은 씬을 받아서 함께 편집하는 사람
 | 작은 스칼라 배열(최대 64개) — `float[]`, `int[]`, `string[]`, `Vector3[]`, `Color[]` 등 | 지원. 배열 하나가 값 하나로 이동하고, 개수 변경도 반영 |
 | 64개 초과 배열·빈 배열 | 미지원. 비교할 대상이 없고 전송량 상한도 없음 |
 | 오브젝트/에셋 참조 필드, `AnimationCurve`, `Gradient` | 미지원. 보내는 쪽에서 조용히 건너뜀 |
-| `TerrainData`(높이맵·스플랫·나무·디테일) | 1024² 한 장이 4MB급 → v0.5에 스트로크 단위 영역 델타로 분리. 그 전까지 터레인은 Host만 편집 |
+| `TerrainData` 높이맵·스플랫맵 | 지원(v0.5). 스트로크 단위 영역 델타를 별도 채널로 전송. **Host만 조각·페인트**하고 게스트는 적용만. 해상도나 레이어 수가 다르면 적용을 거부하고 창에 표시 |
+| 터레인 나무·디테일·구멍(holes) | 미지원. 아직 채널에 없음 |
 | 라이트맵 굽기·네비메시 베이크·터레인 LOD | 설계상 Host가 하고 저장 → Git 공유 |
 | 씬 여러 개 동시 편집 / 씬 간 이동 | 한 세션 = 한 씬 |
 | Undo / Redo | 각자 로컬 undo 스택. 상대의 undo는 상대에게만 |

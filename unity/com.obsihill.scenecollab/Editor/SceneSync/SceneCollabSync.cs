@@ -31,6 +31,7 @@ namespace SceneCollab.Editor.SceneSync
         readonly Queue<SceneOperation> _outbox = new Queue<SceneOperation>();
         readonly Queue<WireMessage> _snapshotOutbox = new Queue<WireMessage>();
         readonly SceneViewPresence _presence = new SceneViewPresence();
+        readonly TerrainSync _terrain = new TerrainSync();
         readonly List<GameObject> _dirty = new List<GameObject>();
         readonly SnapshotReceiver _snapshot = new SnapshotReceiver();
         readonly HashSet<string> _peersSeen = new HashSet<string>(StringComparer.Ordinal);
@@ -171,6 +172,15 @@ namespace SceneCollab.Editor.SceneSync
             get { return _presence; }
         }
 
+        /// <summary>
+        /// Terrain patches (v0.5). Terrain lives in an asset, so it has its own channel; the counters
+        /// here are what the window shows when a peer's terrain could not be applied.
+        /// </summary>
+        internal TerrainSync Terrain
+        {
+            get { return _terrain; }
+        }
+
         public void Bind(ISceneCollabSession session)
         {
             if (ReferenceEquals(_session, session))
@@ -193,6 +203,7 @@ namespace SceneCollab.Editor.SceneSync
             _session.AssetManifestChanged += OnAssetManifestChanged;
             _session.ParticipantsChanged += OnParticipantsChanged;
             _presence.Bind(_session);
+            _terrain.Bind(_session);
         }
 
         public void Unbind()
@@ -212,6 +223,7 @@ namespace SceneCollab.Editor.SceneSync
             _snapshot.Abort();
             _snapshotInFlight = false;
             _presence.Unbind();
+            _terrain.Unbind();
             _session = null;
         }
 
@@ -228,6 +240,7 @@ namespace SceneCollab.Editor.SceneSync
             _outbox.Clear();
             _snapshotOutbox.Clear();
             _snapshotRequested = false;
+            _terrain.Reset();
             PrimeActiveScene();
 
             _feed.Attach();
@@ -263,6 +276,7 @@ namespace SceneCollab.Editor.SceneSync
             }
 
             _feed.Detach();
+            _terrain.Reset();
             LastNote = "off";
         }
 
@@ -346,6 +360,10 @@ namespace SceneCollab.Editor.SceneSync
             // Camera presence runs on the same clock but is not gated by a primed scene: a guest can see
             // where the host is looking before it has a single node id.
             _presence.Tick();
+
+            // Terrain is likewise independent of the node graph: it is an asset, not a node, and a
+            // room whose scene is still unprimed can already sculpt the same terrain.
+            _terrain.Tick();
 
             if (!_primed)
             {

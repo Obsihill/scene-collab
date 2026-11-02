@@ -31,6 +31,13 @@ namespace SceneCollab.Server.WebApi.WebSockets
 
         const int MaxAssetGuids = 8192;
 
+        /// <summary>
+        /// Ceiling for one terrain tile's base64 payload. A 128x128 height tile is ~44k characters and
+        /// a splat tile is smaller, so anything past this is a peer trying to push a whole heightmap
+        /// through the relay in one frame.
+        /// </summary>
+        const int MaxTerrainPayloadChars = 64 * 1024;
+
         public RoomSession(string key)
         {
             Key = key;
@@ -200,6 +207,10 @@ namespace SceneCollab.Server.WebApi.WebSockets
 
                         case MessageTypes.View:
                             await HandleViewAsync(connection, message, cancellationToken).ConfigureAwait(false);
+                            break;
+
+                        case MessageTypes.Terrain:
+                            await HandleTerrainAsync(connection, message, cancellationToken).ConfigureAwait(false);
                             break;
 
                         default:
@@ -372,6 +383,65 @@ namespace SceneCollab.Server.WebApi.WebSockets
                 viewRotZ = message.viewRotZ,
                 viewRotW = message.viewRotW,
                 viewFov = message.viewFov,
+                serverTime = Now(),
+            };
+
+            await BroadcastAsync(WireJson.Serialize(broadcast), connection.ClientId, cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        /// <summary>
+        /// Relays one rectangle of terrain samples (v0.5). Terrain data is host-owned: heights and splat
+        /// weights live in a TerrainData asset that only the host can save, so a guest that sculpts
+        /// would fight a copy of that asset it can never persist. The server refuses those outright
+        /// rather than letting two writers oscillate forever.
+        /// </summary>
+        async Task HandleTerrainAsync(ClientConnection connection, WireMessage message, CancellationToken cancellationToken)
+        {
+            if (!string.Equals(State.HostClientId, connection.ClientId, StringComparison.Ordinal))
+            {
+                await SendErrorAsync(connection, ErrorCodes.NotHost, "only the host edits terrain", cancellationToken)
+                    .ConfigureAwait(false);
+                return;
+            }
+
+            var kindOk = string.Equals(message.terrainKind, "height", StringComparison.Ordinal)
+                || string.Equals(message.terrainKind, "splat", StringComparison.Ordinal);
+
+            if (!message.terrainValid
+                || !kindOk
+                || string.IsNullOrEmpty(message.terrainGuid)
+                || message.terrainX < 0
+                || message.terrainZ < 0
+                || message.terrainWidth <= 0
+                || message.terrainHeight <= 0
+                || message.terrainX + message.terrainWidth > message.terrainResolution
+                || message.terrainZ + message.terrainHeight > message.terrainResolution
+                || message.terrainPayload == null
+                || message.terrainPayload.Length > MaxTerrainPayloadChars)
+            {
+                await SendErrorAsync(connection, ErrorCodes.Malformed, "bad terrain patch", cancellationToken)
+                    .ConfigureAwait(false);
+                return;
+            }
+
+            var broadcast = new WireMessage
+            {
+                type = MessageTypes.Terrain,
+                clientId = connection.ClientId,
+                displayName = connection.DisplayName,
+                room = Key,
+                revision = State.Revision,
+                terrainValid = true,
+                terrainKind = message.terrainKind,
+                terrainGuid = message.terrainGuid,
+                terrainResolution = message.terrainResolution,
+                terrainLayers = message.terrainLayers,
+                terrainX = message.terrainX,
+                terrainZ = message.terrainZ,
+                terrainWidth = message.terrainWidth,
+                terrainHeight = message.terrainHeight,
+                terrainPayload = message.terrainPayload,
                 serverTime = Now(),
             };
 

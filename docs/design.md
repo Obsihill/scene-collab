@@ -87,7 +87,8 @@ builds and breaks on Missing Script.
 | Live prefab **asset** editing | assets are not scene objects; out of scope |
 | Prefab instance field overrides (`m_Modifications`) | normalising one instance's diff into a stable override array is v0.4; creating and deleting instances works |
 | Component removal | v0.4 |
-| `TerrainData` (heightmap/splatmap/trees/details) | a 1024² layer is megabytes; needs stroke-sized region deltas — v0.5 |
+| `TerrainData` heightmap/splatmap | v0.5: stroke-sized region deltas on a dedicated channel, host-authoritative. 16-bit height tiles (128²), byte splat tiles (64², shrinking with layer count) |
+| `TerrainData` trees/details/holes | a 1024² layer is megabytes and holes are sparse; not on the channel yet |
 | Object/asset reference fields, arrays, `AnimationCurve`, `Gradient` | the value codec covers scalars, vectors, colour, enum, string only |
 | Undo across editors | each editor's undo stack is local; undoing someone else's edit is not modelled |
 | 100k+ line monolithic scenes | op latency + resync cost; split scenes additively |
