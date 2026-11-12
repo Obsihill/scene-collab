@@ -121,7 +121,7 @@ namespace SceneCollab.Editor.Tests
             var before = FlatSplat(32, 2, 0f);
             before[0, 0, 0] = 1f;
             var after = (float[,,])before.Clone();
-            after[5, 6, 1] = 0.5f;
+            after[6, 5, 1] = 0.5f;
 
             int x0, z0, width, height;
             Assert.IsTrue(TerrainPatchCodec.TryDiffSplat(before, after, out x0, out z0, out width, out height));

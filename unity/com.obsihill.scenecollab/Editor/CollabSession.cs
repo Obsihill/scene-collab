@@ -516,11 +516,27 @@ namespace SceneCollab.Editor
         {
             var buffer = new byte[ReceiveBufferBytes];
 
+            using (var stream = new MemoryStream())
             while (!token.IsCancellationRequested && socket.State == WebSocketState.Open)
             {
-                using (var stream = new MemoryStream())
+                stream.SetLength(0);
+                WebSocketReceiveResult result;
+                result = await socket.ReceiveAsync(new ArraySegment<byte>(buffer), token).ConfigureAwait(false);
+                if (result.MessageType == WebSocketMessageType.Close)
                 {
-                    WebSocketReceiveResult result;
+                    _inbox.Enqueue(new Inbound { Kind = InboundKind.Closed, Detail = result.CloseStatusDescription });
+                    return;
+                }
+
+                string text;
+                if (result.EndOfMessage)
+                {
+                    // Most frames fit in the reusable receive buffer; avoid a stream and byte copy.
+                    text = Encoding.UTF8.GetString(buffer, 0, result.Count);
+                }
+                else
+                {
+                    stream.Write(buffer, 0, result.Count);
                     do
                     {
                         result = await socket.ReceiveAsync(new ArraySegment<byte>(buffer), token).ConfigureAwait(false);
@@ -533,25 +549,18 @@ namespace SceneCollab.Editor
                         stream.Write(buffer, 0, result.Count);
                     }
                     while (!result.EndOfMessage);
-
-                    var text = Encoding.UTF8.GetString(stream.ToArray());
-                    TouchInbound();
-
-                    if (IsPingFrame(text))
-                    {
-                        // Answered here, not on the editor main thread: saving a big scene or importing
-                        // assets parks that thread for a minute or more, and a queued pong would arrive
-                        // after the server has already given up on us.
-                        await SendTextAsync(socket, PongFrameJson, token).ConfigureAwait(false);
-                        continue;
-                    }
-
-                    _inbox.Enqueue(new Inbound
-                    {
-                        Kind = InboundKind.Text,
-                        Text = text,
-                    });
+                    text = Encoding.UTF8.GetString(stream.GetBuffer(), 0, (int)stream.Length);
+                    // Do not retain an unusually large frame for the lifetime of the connection.
+                    if (stream.Capacity > 1024 * 1024) { stream.SetLength(0); stream.Capacity = 0; }
                 }
+
+                TouchInbound();
+                if (IsPingFrame(text))
+                {
+                    await SendTextAsync(socket, PongFrameJson, token).ConfigureAwait(false);
+                    continue;
+                }
+                _inbox.Enqueue(new Inbound { Kind = InboundKind.Text, Text = text });
             }
 
             _inbox.Enqueue(new Inbound { Kind = InboundKind.Closed });
@@ -602,7 +611,9 @@ namespace SceneCollab.Editor
 
             var token = _cancellation == null ? CancellationToken.None : _cancellation.Token;
             var json = UnityWireJson.Serialize(message);
-            Task.Run(() => SendTextAsync(socket, json, token));
+            // Enter the send gate in call order. Scheduling each message on the thread pool can
+            // reorder overlapping terrain snapshots and live edits before they reach the socket.
+            _ = SendTextAsync(socket, json, token);
         }
 
         // ── main thread side ───────────────────────────────────────────────────
@@ -771,10 +782,7 @@ namespace SceneCollab.Editor
                     break;
 
                 case MessageTypes.Assets:
-                    if (message.assetGuids != null && message.assetGuids.Length > 0)
-                    {
-                        AssetGuids = message.assetGuids;
-                    }
+                    AssetGuids = message.assetGuids ?? new string[0];
 
                     AssetCount = message.assetCount > 0 ? message.assetCount : AssetGuids.Length;
                     var assetHandler = AssetCountChanged;

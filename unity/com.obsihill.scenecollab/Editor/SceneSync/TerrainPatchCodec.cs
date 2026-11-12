@@ -124,8 +124,8 @@ namespace SceneCollab.Editor.SceneSync
                 return false;
             }
 
-            var cols = before.GetLength(0);
-            var rows = before.GetLength(1);
+            var cols = before.GetLength(1);
+            var rows = before.GetLength(0);
             var layers = before.GetLength(2);
             var minX = int.MaxValue;
             var minZ = int.MaxValue;
@@ -139,8 +139,8 @@ namespace SceneCollab.Editor.SceneSync
                     var changed = false;
                     for (var l = 0; l < layers; l++)
                     {
-                        if (Mathf.RoundToInt(Mathf.Clamp(before[c, r, l], 0f, 1f) * 255f)
-                            != Mathf.RoundToInt(Mathf.Clamp(after[c, r, l], 0f, 1f) * 255f))
+                        if (Mathf.RoundToInt(Mathf.Clamp(before[r, c, l], 0f, 1f) * 255f)
+                            != Mathf.RoundToInt(Mathf.Clamp(after[r, c, l], 0f, 1f) * 255f))
                         {
                             changed = true;
                             break;
@@ -238,7 +238,7 @@ namespace SceneCollab.Editor.SceneSync
             return true;
         }
 
-        /// <summary>Packs a rectangle of alphamaps (indexed <c>[x, z, layer]</c>) as one byte per weight.</summary>
+        /// <summary>Packs a rectangle of Unity alphamaps (indexed <c>[z, x, layer]</c>) as one byte per weight.</summary>
         public static string EncodeSplat(float[,,] splat, int x, int z, int width, int height, int layers)
         {
             if (splat == null || width <= 0 || height <= 0 || layers <= 0)
@@ -254,7 +254,7 @@ namespace SceneCollab.Editor.SceneSync
                 {
                     for (var l = 0; l < layers; l++)
                     {
-                        bytes[i++] = (byte)Mathf.RoundToInt(Mathf.Clamp(splat[x + dx, z + dz, l], 0f, 1f) * 255f);
+                        bytes[i++] = (byte)Mathf.RoundToInt(Mathf.Clamp(splat[z + dz, x + dx, l], 0f, 1f) * 255f);
                     }
                 }
             }
@@ -262,7 +262,7 @@ namespace SceneCollab.Editor.SceneSync
             return Convert.ToBase64String(bytes);
         }
 
-        /// <summary>Inverse of <see cref="EncodeSplat"/>; the result is <c>[x, z, layer]</c> so SetAlphamaps takes it as is.</summary>
+        /// <summary>Inverse of <see cref="EncodeSplat"/>; the result is <c>[z, x, layer]</c> for SetAlphamaps.</summary>
         public static bool TryDecodeSplat(string payload, int width, int height, int layers, out float[,,] region)
         {
             region = null;
@@ -287,7 +287,7 @@ namespace SceneCollab.Editor.SceneSync
                 return false;
             }
 
-            var values = new float[width, height, layers];
+            var values = new float[height, width, layers];
             var i = 0;
             for (var dx = 0; dx < width; dx++)
             {
@@ -295,7 +295,7 @@ namespace SceneCollab.Editor.SceneSync
                 {
                     for (var l = 0; l < layers; l++)
                     {
-                        values[dx, dz, l] = bytes[i++] / 255f;
+                        values[dz, dx, l] = bytes[i++] / 255f;
                     }
                 }
             }

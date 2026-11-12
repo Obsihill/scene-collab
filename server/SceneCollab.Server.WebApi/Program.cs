@@ -173,7 +173,14 @@ async Task HandleWebSocketAsync(HttpContext context)
     log.LogInformation("connect room={Room} client={Client} peers={Peers}",
         roomKey, connection.ClientId, room.ConnectionCount);
 
-    await room.HandleAsync(socket, connection, context.RequestAborted);
+    try
+    {
+        await room.HandleAsync(socket, connection, context.RequestAborted);
+    }
+    finally
+    {
+        hub.ReleaseRoom(room);
+    }
 
     log.LogInformation("disconnect room={Room} client={Client} peers={Peers}",
         roomKey, connection.ClientId, room.ConnectionCount);

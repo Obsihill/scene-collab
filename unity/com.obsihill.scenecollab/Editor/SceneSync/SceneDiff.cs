@@ -74,7 +74,8 @@ namespace SceneCollab.Editor.SceneSync
         /// A 5 000-object sweep would otherwise allocate 5 000 lists per tick — garbage that surfaces as a
         /// periodic hitch and gets blamed on the network. The hot path reuses one list.
         /// </summary>
-        public void CollectInto(GameObject gameObject, string nodeId, List<SceneOperation> operations)
+        public void CollectInto(GameObject gameObject, string nodeId, List<SceneOperation> operations,
+            bool skipInterpolatedPosition = false)
         {
             operations.Clear();
 
@@ -89,6 +90,11 @@ namespace SceneCollab.Editor.SceneSync
             for (var i = 0; i < _paths.Count; i++)
             {
                 var path = _paths[i];
+
+                if (skipInterpolatedPosition && path == ScenePropertyAccess.LocalPosition)
+                {
+                    continue;
+                }
 
                 string current;
                 if (!ScenePropertyAccess.TryRead(gameObject, path, Registry, out current))

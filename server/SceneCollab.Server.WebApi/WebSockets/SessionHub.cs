@@ -11,6 +11,8 @@ namespace SceneCollab.Server.WebApi.WebSockets
     {
         readonly ConcurrentDictionary<string, RoomSession> _rooms =
             new ConcurrentDictionary<string, RoomSession>(System.StringComparer.Ordinal);
+        readonly object _gate = new object();
+        readonly Dictionary<RoomSession, int> _leases = new Dictionary<RoomSession, int>();
 
         public int RoomCount
         {
@@ -19,21 +21,33 @@ namespace SceneCollab.Server.WebApi.WebSockets
 
         public RoomSession GetRoom(string roomKey)
         {
-            return _rooms.GetOrAdd(roomKey, key => new RoomSession(key) { OnEmpty = RemoveIfStillRegistered });
+            lock (_gate)
+            {
+                var room = _rooms.GetOrAdd(roomKey, key => new RoomSession(key));
+                _leases.TryGetValue(room, out var count);
+                _leases[room] = count + 1;
+                return room;
+            }
         }
 
         /// <summary>
-        /// A room nobody is in is not a room. Without this the process keeps one entry per name anybody
-        /// ever typed, and <c>/health</c> reports rooms that <c>/rooms</c> does not list.
-        ///
-        /// The identity check matters: a peer can re-create the same room key while the old instance is
-        /// still finishing its teardown, and the late callback must not evict the new room.
+        /// Releases a connection's room lease, including connections that never completed hello.
+        /// The last lease removes the room atomically with respect to new acquisitions.
         /// </summary>
-        void RemoveIfStillRegistered(RoomSession room)
+        public void ReleaseRoom(RoomSession room)
         {
-            if (_rooms.TryGetValue(room.Key, out var registered) && ReferenceEquals(registered, room))
+            lock (_gate)
             {
-                _rooms.TryRemove(room.Key, out _);
+                if (!_leases.TryGetValue(room, out var count))
+                    throw new System.InvalidOperationException("Room lease has already been released.");
+                if (count > 1)
+                {
+                    _leases[room] = count - 1;
+                    return;
+                }
+                _leases.Remove(room);
+                if (_rooms.TryGetValue(room.Key, out var registered) && ReferenceEquals(registered, room))
+                    _rooms.TryRemove(room.Key, out _);
             }
         }
 

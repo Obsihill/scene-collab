@@ -274,11 +274,14 @@ no op at all — the diff is right to report "nothing changed". Patches travel o
 - `terrainPayload` is base64 — row-major little-endian **16-bit** heights (`1/65535` of full scale) for
   `height`, one **byte per weight** for `splat`. One patch covers at most 128×128 height samples (32 KB
   raw, ~44 KB encoded) or 64×64 splat samples; a wider stroke arrives as several tiles, and the tile
-  shrinks automatically when a terrain has many layers.
+  shrinks automatically when a terrain has many layers. Splat payloads iterate X, then Z, then layer;
+  Unity's alphamap arrays are indexed `[z, x, layer]`. Editors must use the corrected codec on all peers.
 - The host is the only writer; the server answers `not_host` to anyone else. Guests apply, mark the
   TerrainData dirty, and never save it — the host owns the asset exactly as it owns the scene.
-- The message carries no `revision` and never enters the op log. A tile is superseded by the next one,
-  and terrain traffic must not make every scene op look stale.
+- The message carries no `revision` and never enters the op log. On join or reconnect the host sends
+  a full tiled terrain transfer, including after the scene snapshot, followed by live changes. It is
+  also broadcast to existing peers. Delivery is not acknowledged or replayed; reconnecting triggers a
+  fresh transfer.
 - Trees, details and terrain holes are not on this channel yet.
 
 ## Room listing

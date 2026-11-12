@@ -28,10 +28,11 @@ namespace SceneCollab.Editor.SceneSync
         readonly SceneChangeFeed _feed = new SceneChangeFeed();
         readonly SceneStructure _structure;
         readonly SceneOpApplier _applier;
-        readonly Queue<SceneOperation> _outbox = new Queue<SceneOperation>();
+        readonly SceneOperationOutbox _outbox = new SceneOperationOutbox();
         readonly Queue<WireMessage> _snapshotOutbox = new Queue<WireMessage>();
         readonly SceneViewPresence _presence = new SceneViewPresence();
         readonly TerrainSync _terrain = new TerrainSync();
+        readonly RemotePositionInterpolation _positions = new RemotePositionInterpolation();
         readonly List<GameObject> _dirty = new List<GameObject>();
         readonly List<GameObject> _undoTargets = new List<GameObject>();
         readonly List<SceneOperation> _operations = new List<SceneOperation>();
@@ -47,6 +48,7 @@ namespace SceneCollab.Editor.SceneSync
         /// <summary>How often markers are re-checked against the content they stand in for.</summary>
         const double MarkerSweepSeconds = 1.0;
         bool _awaitingAck;
+        bool _terrainAfterSnapshot;
         bool _primed;
         bool _listening;
         bool _snapshotInFlight;
@@ -240,6 +242,7 @@ namespace SceneCollab.Editor.SceneSync
 
         public void Unbind()
         {
+            _positions.Finish();
             if (_session != null)
             {
                 _session.OperationReceived -= OnOperationReceived;
@@ -287,11 +290,17 @@ namespace SceneCollab.Editor.SceneSync
             {
                 EditorApplication.update += Tick;
                 EditorSceneManager.sceneSaved += OnSceneSaved;
+                EditorSceneManager.sceneSaving += OnSceneSaving;
                 _listening = true;
             }
 
             UpdateSaveGuard();
             LastNote = "syncing";
+            if (_session != null && _session.State == CollabConnectionState.Connected)
+            {
+                if (_session.IsHost) _terrain.RequestFullSync();
+                else RequestSnapshot();
+            }
         }
 
         public void Disable()
@@ -302,6 +311,7 @@ namespace SceneCollab.Editor.SceneSync
             }
 
             Enabled = false;
+            _positions.Finish();
             _outbox.Clear();
             _awaitingAck = false;
             _readiness.Reset();
@@ -314,6 +324,7 @@ namespace SceneCollab.Editor.SceneSync
             {
                 EditorApplication.update -= Tick;
                 EditorSceneManager.sceneSaved -= OnSceneSaved;
+                EditorSceneManager.sceneSaving -= OnSceneSaving;
                 _listening = false;
             }
 
@@ -338,6 +349,7 @@ namespace SceneCollab.Editor.SceneSync
         /// </summary>
         public void PrimeActiveScene()
         {
+            _positions.Finish();
             var scene = SceneManager.GetActiveScene();
             if (!scene.IsValid() || !scene.isLoaded)
             {
@@ -366,6 +378,7 @@ namespace SceneCollab.Editor.SceneSync
 
         void OnUndoRedo()
         {
+            _positions.Finish();
             // Undo has two problems the diff alone cannot solve: it can restore a value a peer has since
             // changed (UndoArbitration refuses those fields), and the sweep it needs is the most expensive
             // thing this package does (so it is deferred to the next tick and shares the outbox pump).
@@ -548,6 +561,7 @@ namespace SceneCollab.Editor.SceneSync
             }
 
             var now = EditorApplication.timeSinceStartup;
+            _positions.Tick(now);
 
             // A scene file that changed without a save here means another tool (or another editor) wrote
             // it. Checked on a slow clock because it hashes the file; reported, never auto-reverted.
@@ -635,7 +649,7 @@ namespace SceneCollab.Editor.SceneSync
                     continue;
                 }
 
-                _diff.CollectInto(gameObject, nodeId, _operations);
+                _diff.CollectInto(gameObject, nodeId, _operations, _positions.IsAnimating(nodeId));
                 for (var j = 0; j < _operations.Count; j++)
                 {
                     var operation = _operations[j];
@@ -857,6 +871,7 @@ namespace SceneCollab.Editor.SceneSync
                 }
 
                 _snapshotInFlight = true;
+                _terrainAfterSnapshot = _session.IsHost && frame.opKind == OpKinds.SnapshotEnd;
                 _awaitingAck = true;
                 if (frame.opKind == OpKinds.SnapshotChunk)
                 {
@@ -914,6 +929,18 @@ namespace SceneCollab.Editor.SceneSync
                     return;
             }
 
+            GameObject positionObject = null;
+            Vector3 previousPosition = default(Vector3);
+            var smoothPosition = Enabled && !message.snapshot
+                && (message.opKind == OpKinds.SetProperty || message.opKind == OpKinds.SetPrefabOverride)
+                && message.propertyPath == ScenePropertyAccess.LocalPosition
+                && _registry.TryResolve(message.nodeId, out positionObject) && positionObject != null
+                && !Selection.Contains(positionObject);
+            if (smoothPosition) previousPosition = positionObject.transform.localPosition;
+            else if (message.propertyPath == ScenePropertyAccess.LocalPosition) _positions.Cancel(message.nodeId);
+            if (!smoothPosition && (message.opKind == OpKinds.RemoveNode || message.opKind == OpKinds.Reparent))
+                _positions.Finish();
+
             string note;
             if (!_applier.Apply(message, out note) && note != null)
             {
@@ -933,6 +960,8 @@ namespace SceneCollab.Editor.SceneSync
                 return;
             }
 
+            if (smoothPosition)
+                _positions.Start(message.nodeId, positionObject.transform, previousPosition, EditorApplication.timeSinceStartup);
             NoteApplied(message);
             LastNote = "applied " + message.propertyPath + " from " + (message.displayName ?? "peer");
         }
@@ -959,6 +988,13 @@ namespace SceneCollab.Editor.SceneSync
             if (_snapshotInFlight)
             {
                 _snapshotInFlight = false;
+
+                if (_terrainAfterSnapshot && message != null && (message.accepted || message.duplicate))
+                {
+                    // The guest can now resolve Terrain components created by the scene snapshot.
+                    _terrain.RequestFullSync();
+                }
+                _terrainAfterSnapshot = false;
 
                 if (message != null && !message.accepted && !message.duplicate)
                 {
@@ -1007,6 +1043,7 @@ namespace SceneCollab.Editor.SceneSync
 
             if (_session != null && _session.State != CollabConnectionState.Connected)
             {
+                _positions.Finish();
                 // One request per connection. A guest that comes back after a drop is a new join as far
                 // as the server is concerned — it has no baseline any more, so the flag has to clear or
                 // the re-request is silently skipped and the editor carries on against a stale scene.
@@ -1021,6 +1058,7 @@ namespace SceneCollab.Editor.SceneSync
             if (_session != null && _session.State == CollabConnectionState.Connected && Enabled && _session.IsHost)
             {
                 PublishManifest();
+                _terrain.RequestFullSync();
             }
 
             if (_session != null && _session.State == CollabConnectionState.Connected && Enabled && !_session.IsHost)
@@ -1110,6 +1148,13 @@ namespace SceneCollab.Editor.SceneSync
                 return false;
             }
 
+            if (_session.IsHost)
+            {
+                // Scene snapshots carry references to TerrainData, not its samples. Restart even
+                // when a scene snapshot is already queued: this requester may have missed tiles.
+                _terrain.RequestFullSync();
+            }
+
             if (_snapshotOutbox.Count > 0)
             {
                 // A snapshot is already on its way; a second one would race it into a half-applied scene.
@@ -1141,6 +1186,7 @@ namespace SceneCollab.Editor.SceneSync
                 return;
             }
 
+            _positions.Finish();
             _snapshot.Begin();
             LastNote = "snapshot from " + (string.IsNullOrEmpty(message.displayName) ? "host" : message.displayName) + " — receiving";
         }
@@ -1277,6 +1323,11 @@ namespace SceneCollab.Editor.SceneSync
             // one failure this design cannot undo, because the file is the source of truth for everyone
             // else who opens it later.
             SceneSaveGuard.HostNotVerified = connected && _session.IsHost && !_readiness.IsReady;
+        }
+
+        void OnSceneSaving(Scene scene, string path)
+        {
+            _positions.Finish();
         }
 
         void OnSceneSaved(Scene scene)

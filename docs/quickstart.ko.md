@@ -106,7 +106,7 @@ Guest = 같은 씬을 받아서 함께 편집하는 사람
 
 | 기능 | 비고 |
 |---|---|
-| Transform 위치·회전·스케일 | 채널 단위(x/y/z 따로) |
+| Transform 위치·회전·스케일 | 상대 위치는 약 0.1초 동안 보간. 회전·스케일은 즉시 적용 |
 | GameObject 이름, `activeSelf` | |
 | 컴포넌트 `enabled` | 체크박스 |
 | 컴포넌트 필드 — `int`, `float`, `bool`, `string`, `enum`, `Vector2`, `Vector3`, `Quaternion`, `Color` | 어떤 컴포넌트든 `SerializedProperty`를 훑어서 찾음 |

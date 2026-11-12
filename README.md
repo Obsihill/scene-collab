@@ -53,7 +53,7 @@ Verified end to end, not by unit tests alone:
 `Packages/manifest.json`:
 
 ```jsonc
-"com.obsihill.scenecollab": "https://github.com/Obsihill/scene-collab.git?path=unity/com.obsihill.scenecollab#v0.5.5"
+"com.obsihill.scenecollab": "https://github.com/Obsihill/scene-collab.git?path=unity/com.obsihill.scenecollab#v0.5.6"
 ```
 
 Then `Tools > Scene Collab`. Requires Unity **6000.0 or newer**.
@@ -94,7 +94,7 @@ that node's lock. Any participant may restructure — but only the host can save
 
 | Edit | Syncs? | Notes |
 |---|---|---|
-| Transform position / rotation / scale | yes | per channel, not per vector |
+| Transform position / rotation / scale | yes | remote positions interpolate over 0.1 seconds; rotation and scale apply immediately |
 | GameObject name, `activeSelf` | yes | |
 | Component `enabled` | yes | |
 | Component fields: `int`, `float`, `bool`, `string`, `enum`, `Vector2`, `Vector3`, `Quaternion`, `Color` | yes | any component, found by walking `SerializedProperty` |

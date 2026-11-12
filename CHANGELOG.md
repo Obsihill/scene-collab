@@ -5,6 +5,21 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.6] — 2026-11-13
+
+### Fixed
+
+- Capture the initial terrain paint baseline and send terrain heights and paint to participants joining
+  or reconnecting, including after their scene snapshot. Correct the alphamap X/Z mapping; all editors
+  should update together.
+- Keep room lifetime and operation broadcasts ordered across concurrent connections, and clear an
+  asset manifest when the host publishes an empty list.
+
+### Changed
+
+- Smooth remote position changes, coalesce consecutive unsent property writes, and reduce allocations
+  when receiving WebSocket messages and drawing peer cameras.
+
 ## [0.5.5] — 2026-11-02
 
 Five things a scene-sharing tool is expected to get right before anyone trusts it with a level. Each of

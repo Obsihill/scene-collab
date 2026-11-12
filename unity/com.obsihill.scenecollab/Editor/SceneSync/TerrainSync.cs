@@ -52,6 +52,9 @@ namespace SceneCollab.Editor.SceneSync
 
         ISceneCollabSession _session;
         double _nextPoll;
+        bool _fullSyncRequested;
+        IEnumerator<WireMessage> _fullSync;
+        const int FullSyncTilesPerTick = 8;
 
         /// <summary>Patches this editor sent (host side).</summary>
         public int Sent { get; private set; }
@@ -110,6 +113,15 @@ namespace SceneCollab.Editor.SceneSync
             _byGuid.Clear();
             _terrains.Clear();
             _nextPoll = 0;
+            _fullSyncRequested = false;
+            if (_fullSync != null) _fullSync.Dispose();
+            _fullSync = null;
+        }
+
+        /// <summary>Restart the full transfer so a newly joined peer receives every tile.</summary>
+        public void RequestFullSync()
+        {
+            _fullSyncRequested = true;
         }
 
         public void Tick()
@@ -136,9 +148,80 @@ namespace SceneCollab.Editor.SceneSync
                 return;
             }
 
+            if (_fullSyncRequested)
+            {
+                if (_fullSync != null) _fullSync.Dispose();
+                _fullSync = FullSyncTiles(new List<TerrainData>(_terrains)).GetEnumerator();
+                _fullSyncRequested = false;
+            }
+
+            if (_fullSync != null)
+            {
+                for (var tile = 0; tile < FullSyncTilesPerTick; tile++)
+                {
+                    if (!_fullSync.MoveNext())
+                    {
+                        _fullSync.Dispose();
+                        _fullSync = null;
+                        break;
+                    }
+
+                    if (!_session.SendTerrain(_fullSync.Current))
+                    {
+                        _fullSyncRequested = true;
+                        break;
+                    }
+                    Sent++;
+                }
+            }
+
             for (var i = 0; i < _terrains.Count; i++)
             {
                 Poll(_terrains[i], now);
+            }
+        }
+
+        IEnumerable<WireMessage> FullSyncTiles(List<TerrainData> terrains)
+        {
+            foreach (var data in terrains)
+            {
+                if (data == null) continue;
+                string guid;
+                long localId;
+                if (!AssetDatabase.TryGetGUIDAndLocalFileIdentifier(data, out guid, out localId)
+                    || string.IsNullOrEmpty(guid)) continue;
+
+                var resolution = data.heightmapResolution;
+                var tileSize = TerrainPatchCodec.HeightTile;
+                for (var z = 0; z < resolution; z += tileSize)
+                for (var x = 0; x < resolution; x += tileSize)
+                {
+                    if (data == null || data.heightmapResolution != resolution) { RequestFullSync(); yield break; }
+                    var width = Math.Min(tileSize, resolution - x);
+                    var height = Math.Min(tileSize, resolution - z);
+                    var samples = data.GetHeights(x, z, width, height);
+                    yield return new WireMessage { terrainKind = TerrainPatchCodec.KindHeight, terrainGuid = guid,
+                        terrainResolution = resolution, terrainX = x, terrainZ = z, terrainWidth = width,
+                        terrainHeight = height, terrainPayload = TerrainPatchCodec.EncodeHeights(samples, 0, 0, width, height) };
+                }
+
+                if (data == null || data.alphamapLayers <= 0 || data.alphamapTextureCount <= 0) continue;
+                resolution = data.alphamapResolution;
+                var layers = data.alphamapLayers;
+                tileSize = TerrainPatchCodec.TileForLayers(layers);
+                for (var z = 0; z < resolution; z += tileSize)
+                for (var x = 0; x < resolution; x += tileSize)
+                {
+                    if (data == null || data.alphamapResolution != resolution || data.alphamapLayers != layers)
+                    { RequestFullSync(); yield break; }
+                    var width = Math.Min(tileSize, resolution - x);
+                    var height = Math.Min(tileSize, resolution - z);
+                    var samples = data.GetAlphamaps(x, z, width, height);
+                    yield return new WireMessage { terrainKind = TerrainPatchCodec.KindSplat, terrainGuid = guid,
+                        terrainResolution = resolution, terrainLayers = layers, terrainX = x, terrainZ = z,
+                        terrainWidth = width, terrainHeight = height,
+                        terrainPayload = TerrainPatchCodec.EncodeSplat(samples, 0, 0, width, height, layers) };
+                }
             }
         }
 
@@ -181,7 +264,6 @@ namespace SceneCollab.Editor.SceneSync
                 baseline.AlphaResolution = data.alphamapResolution;
                 baseline.Layers = data.alphamapLayers;
                 CaptureHeights(data, baseline);
-                baseline.Splat = null;
                 LastNote = "terrain settings changed; rebaselined";
                 return;
             }
@@ -327,8 +409,10 @@ namespace SceneCollab.Editor.SceneSync
         void CaptureHeights(TerrainData data, Baseline baseline)
         {
             baseline.Heights = data.GetHeights(0, 0, baseline.HeightResolution, baseline.HeightResolution);
-            baseline.Splat = null;
-            baseline.LastSplatRead = 0;
+            baseline.Splat = baseline.Layers > 0 && data.alphamapTextureCount > 0
+                ? data.GetAlphamaps(0, 0, baseline.AlphaResolution, baseline.AlphaResolution)
+                : null;
+            baseline.LastSplatRead = EditorApplication.timeSinceStartup;
         }
 
         void EmitHeights(string guid, int resolution, float[,] heights, int x, int z, int width, int height)

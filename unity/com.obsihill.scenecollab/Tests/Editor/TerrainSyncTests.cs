@@ -174,6 +174,108 @@ namespace SceneCollab.Editor.Tests
             }
         }
 
+        [Test]
+        public void FirstPaintAfterBaselineIsSent()
+        {
+            var first = new TerrainLayer();
+            var second = new TerrainLayer();
+            var sync = new TerrainSync();
+            try
+            {
+                _data.alphamapResolution = 16;
+                _data.terrainLayers = new[] { first, second };
+                var session = new FakeSession { IsHost = true };
+                sync.Bind(session);
+                sync.Tick();
+
+                var paint = new float[1, 1, 2];
+                paint[0, 0, 1] = 1f;
+                _data.SetAlphamaps(3, 4, paint);
+                EditorUtility.SetDirty(_data);
+                Thread.Sleep((int)(TerrainSync.SplatPollSeconds * 1000) + 200);
+                sync.Tick();
+
+                var patch = session.SentTerrain.Find(p => p.terrainKind == "splat");
+                Assert.IsNotNull(patch, "the first paint must not become the baseline");
+                float[,,] decoded;
+                Assert.IsTrue(TerrainPatchCodec.TryDecodeSplat(patch.terrainPayload, patch.terrainWidth,
+                    patch.terrainHeight, 2, out decoded));
+                Assert.AreEqual(1f, decoded[4 - patch.terrainZ, 3 - patch.terrainX, 1], 1f / 255f);
+
+                var original = new float[1, 1, 2];
+                original[0, 0, 0] = 1f;
+                _data.SetAlphamaps(3, 4, original);
+                patch.terrainValid = true;
+                var guest = new FakeSession { IsHost = false };
+                var guestSync = new TerrainSync();
+                try
+                {
+                    guestSync.Bind(guest);
+                    guest.Deliver(patch);
+                    Assert.AreEqual(1, guestSync.Applied);
+                    Assert.AreEqual(1f, _data.GetAlphamaps(3, 4, 1, 1)[0, 0, 1], 1f / 255f);
+                }
+                finally { guestSync.Unbind(); }
+            }
+            finally
+            {
+                sync.Unbind();
+                UnityEngine.Object.DestroyImmediate(first);
+                UnityEngine.Object.DestroyImmediate(second);
+            }
+        }
+
+        [Test]
+        public void FullSyncRestartsForAJoiningPeerAndIncludesCurrentSamples()
+        {
+            var session = new FakeSession { IsHost = true };
+            var sync = new TerrainSync();
+            var first = new TerrainLayer();
+            var second = new TerrainLayer();
+            try
+            {
+                _data.heightmapResolution = 513;
+                _data.alphamapResolution = 16;
+                _data.terrainLayers = new[] { first, second };
+                _data.SetHeights(100, 100, Blob(1, 1, 0.5f));
+                var paint = new float[1, 1, 2];
+                paint[0, 0, 1] = 1f;
+                _data.SetAlphamaps(3, 4, paint);
+                sync.Bind(session);
+                sync.RequestFullSync();
+                sync.Tick();
+                Assert.Greater(session.SentTerrain.Count, 0);
+
+                // A peer joining during a transfer must receive the beginning again.
+                session.SentTerrain.Clear();
+                sync.RequestFullSync();
+                TickAgain(sync);
+
+                var firstTile = session.SentTerrain.Find(p => p.terrainKind == "height"
+                    && p.terrainX == 0 && p.terrainZ == 0);
+                Assert.IsNotNull(firstTile);
+                float[,] decoded;
+                Assert.IsTrue(TerrainPatchCodec.TryDecodeHeights(firstTile.terrainPayload,
+                    firstTile.terrainWidth, firstTile.terrainHeight, out decoded));
+                Assert.AreEqual(0.5f, decoded[100, 100], 1f / 65535f);
+                for (var i = 0; i < 3; i++) TickAgain(sync);
+                Assert.IsNotNull(session.SentTerrain.Find(p => p.terrainKind == "height"
+                    && p.terrainX == 512 && p.terrainZ == 512), "edge tiles must be included");
+                var splat = session.SentTerrain.Find(p => p.terrainKind == "splat");
+                Assert.IsNotNull(splat, "the transfer must include painted layers");
+                float[,,] decodedSplat;
+                Assert.IsTrue(TerrainPatchCodec.TryDecodeSplat(splat.terrainPayload,
+                    splat.terrainWidth, splat.terrainHeight, splat.terrainLayers, out decodedSplat));
+                Assert.AreEqual(1f, decodedSplat[4, 3, 1], 1f / 255f);
+            }
+            finally
+            {
+                sync.Unbind();
+                UnityEngine.Object.DestroyImmediate(first);
+                UnityEngine.Object.DestroyImmediate(second);
+            }
+        }
+
         /// <summary>
         /// <see cref="TerrainSync.Tick"/> polls at 0.6 s intervals, so a second edit inside one interval
         /// would be invisible — which is the point: sculpt strokes are far coarser than that.

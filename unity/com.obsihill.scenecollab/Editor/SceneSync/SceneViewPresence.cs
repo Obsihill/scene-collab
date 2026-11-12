@@ -287,8 +287,8 @@ namespace SceneCollab.Editor.SceneSync
             var origin = peer.Position;
             var rotation = peer.Rotation;
 
-            var near = Corners(origin, rotation, nearDistance, nearHalfW, nearHalfH);
-            var far = Corners(origin, rotation, farDistance, farHalfW, farHalfH);
+            var near = new Corners(origin, rotation, nearDistance, nearHalfW, nearHalfH);
+            var far = new Corners(origin, rotation, farDistance, farHalfW, farHalfH);
 
             var color = peer.Color;
             color.a = 0.85f;
@@ -319,15 +319,22 @@ namespace SceneCollab.Editor.SceneSync
             }
         }
 
-        static Vector3[] Corners(Vector3 origin, Quaternion rotation, float distance, float halfWidth, float halfHeight)
+        struct Corners
         {
-            return new[]
+            readonly Vector3 _a, _b, _c, _d;
+
+            public Corners(Vector3 origin, Quaternion rotation, float distance, float halfWidth, float halfHeight)
             {
-                origin + rotation * new Vector3(-halfWidth, -halfHeight, distance),
-                origin + rotation * new Vector3(halfWidth, -halfHeight, distance),
-                origin + rotation * new Vector3(-halfWidth, halfHeight, distance),
-                origin + rotation * new Vector3(halfWidth, halfHeight, distance),
-            };
+                _a = origin + rotation * new Vector3(-halfWidth, -halfHeight, distance);
+                _b = origin + rotation * new Vector3(halfWidth, -halfHeight, distance);
+                _c = origin + rotation * new Vector3(-halfWidth, halfHeight, distance);
+                _d = origin + rotation * new Vector3(halfWidth, halfHeight, distance);
+            }
+
+            public Vector3 this[int index]
+            {
+                get { return index == 0 ? _a : index == 1 ? _b : index == 2 ? _c : _d; }
+            }
         }
     }
 }

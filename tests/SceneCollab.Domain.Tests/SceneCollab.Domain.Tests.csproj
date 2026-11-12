@@ -21,6 +21,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\server\SceneCollab.Domain\SceneCollab.Domain.csproj" />
+    <ProjectReference Include="..\..\server\SceneCollab.Server.WebApi\SceneCollab.Server.WebApi.csproj" />
   </ItemGroup>
 
 </Project>

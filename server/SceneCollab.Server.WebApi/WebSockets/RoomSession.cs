@@ -20,6 +20,7 @@ namespace SceneCollab.Server.WebApi.WebSockets
         const int MaxMessageBytes = 4 * 1024 * 1024;
 
         readonly object _gate = new object();
+        readonly SemaphoreSlim _operationGate = new SemaphoreSlim(1, 1);
         readonly Dictionary<string, ClientConnection> _clients =
             new Dictionary<string, ClientConnection>(StringComparer.Ordinal);
 
@@ -45,12 +46,6 @@ namespace SceneCollab.Server.WebApi.WebSockets
         }
 
         public string Key { get; }
-
-        /// <summary>
-        /// Called once when the last occupant leaves, so the hub can drop an abandoned room. Set by
-        /// <see cref="SessionHub"/>; null in tests.
-        /// </summary>
-        public Action<RoomSession> OnEmpty { get; set; }
 
         public RoomState State { get; }
 
@@ -300,6 +295,21 @@ namespace SceneCollab.Server.WebApi.WebSockets
 
         async Task HandleOpAsync(ClientConnection connection, WireMessage message, CancellationToken cancellationToken)
         {
+            await _operationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                await ApplyAndBroadcastOpAsync(connection, message).ConfigureAwait(false);
+            }
+            finally
+            {
+                _operationGate.Release();
+            }
+        }
+
+        async Task ApplyAndBroadcastOpAsync(ClientConnection connection, WireMessage message)
+        {
+            // Once applied, delivery must not be cancelled by the sender disconnecting.
+            var cancellationToken = CancellationToken.None;
             // Never trust the identity a client claims for itself.
             message.clientId = connection.ClientId;
 
@@ -600,11 +610,9 @@ namespace SceneCollab.Server.WebApi.WebSockets
         async Task RemoveAsync(ClientConnection connection)
         {
             bool removed;
-            bool empty;
             lock (_gate)
             {
                 removed = _clients.Remove(connection.ClientId);
-                empty = removed && _clients.Count == 0;
             }
 
             if (!removed)
@@ -613,12 +621,6 @@ namespace SceneCollab.Server.WebApi.WebSockets
             }
 
             State.Leave(connection.ClientId);
-
-            if (empty)
-            {
-                // Hands the room back to the hub so an abandoned room does not outlive its occupants.
-                OnEmpty?.Invoke(this);
-            }
 
             // The request token is already cancelled here in most disconnects.
             await BroadcastPresenceAsync(null, CancellationToken.None).ConfigureAwait(false);
