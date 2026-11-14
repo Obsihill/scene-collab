@@ -16,6 +16,13 @@ Everyone else streams typed operations to the authoritative server.
 
 ## Status
 
+**v0.6.0 — released 2026-11-14 (KST)** includes a **protocol 2** recovery barrier, automatic
+terrain-region leases and recovery UI. Server and editor packages must be updated together;
+`v0.5.6` uses protocol 1 and is incompatible. Real multi-editor interaction and external-network
+performance validation remain pending. See
+[the protocol](docs/protocol.md#automatic-terrain-leases-protocol-2) and
+[the changelog](CHANGELOG.md#060--2026-11-14).
+
 v0.3 turns a connection into a **session**: one editor opens a scene and hosts it, everyone else picks
 that scene from a list, and only the host writes the file. Structural edits travel as well — objects
 appear, move in the hierarchy and disappear on every machine — and an object under restructure is
@@ -24,18 +31,21 @@ locked so two people cannot fight over the same GameObject.
 | Part | State |
 |---|---|
 | Server: `/health`, `/rooms`, token auth, room isolation, presence, host promotion | done |
-| Operations: authoritative apply, broadcast, idempotent replay, conflict rejection, node locks | done (24 unit tests + probe) |
-| Unity package: install, window, scene picker, connect, presence, lock UI | done (36 EditMode tests, Unity 6000.6) |
+| Operations: authoritative apply, broadcast, idempotent replay, conflict rejection, node locks | done (81 server tests) |
+| Unity package: install, window, scene picker, connect, presence, lock UI | done (251 EditMode tests, Unity 6000.6) |
 | Value ops (`set_property`): transform, name, active, enabled, component fields | done |
-| Structural ops: `add_node`, `remove_node`, `reparent`, `reorder_children`, `add_component` | done (host-only, lock-guarded) |
+| Structural ops: `add_node`, `remove_node`, `reparent`, `reorder_children`, `add_component` | done (lock-guarded; only the host saves) |
 | Asset manifest + placeholders for missing assets | done |
 | Late joiner: host streams the full scene as a chunked snapshot | done |
 | Prefab instance overrides (`set_prefab_override` promotion) | done |
 | Peer scene-view cameras (editor overlay, `view` messages) | done |
-| Terrain heightmap + splatmap (host-authoritative region patches) | done (v0.5) |
+| Terrain heightmap + splatmap (automatic region leases; only the host saves) | implemented (v0.6.0; real multi-editor validation pending) |
+| Room recovery barrier, edit/save guards and recovery UI | implemented (v0.6.0; real multi-editor validation pending) |
 | Prefab-instance structural edits (`addedObjects`), terrain trees/details/holes | not yet — see [roadmap](#roadmap) |
 
-Verified end to end, not by unit tests alone:
+v0.6.0 validation: **81 server tests and 251 Unity EditMode tests passed.**
+
+Earlier end-to-end checks:
 
 - `tools/SceneCollab.V03Probe` — 23 checks against a live server with two WebSocket peers, no editor.
 - `LiveHarnessV03` — a Unity-free peer creates a cube in a headless Unity scene, moves it to
@@ -46,14 +56,13 @@ Verified end to end, not by unit tests alone:
   with the `snapshot` flag, a host snapshot allowed through a guest's lock while a guest's "snapshot"
   is still refused (`locked`), and a camera pose delivered to the peer but not echoed to its sender and
   without moving the revision.
-- 28 server tests, 62 EditMode tests.
 
 ## 1. Install the Unity package
 
 `Packages/manifest.json`:
 
 ```jsonc
-"com.obsihill.scenecollab": "https://github.com/Obsihill/scene-collab.git?path=unity/com.obsihill.scenecollab#v0.5.6"
+"com.obsihill.scenecollab": "https://github.com/Obsihill/scene-collab.git?path=unity/com.obsihill.scenecollab#v0.6.0"
 ```
 
 Then `Tools > Scene Collab`. Requires Unity **6000.0 or newer**.
@@ -76,9 +85,15 @@ Window → server URL (`ws://localhost:8080/ws`) → access token → **Refresh*
 scene someone already has open → **Connect**. If nobody has opened a scene yet, type a room name and
 connect first: **the first client hosts that scene**, everyone after it joins.
 
-The host is also the scribe: it saves the scene to disk. If the host disconnects, the participant who
-has been connected longest takes over, so saving does not stop. Everyone else's `Ctrl+S` is blocked
-with a warning rather than writing a diverging file.
+Connect starts full scene and terrain synchronisation automatically. Normal editing and saving stay
+paused until every participant confirms the transfer. Joining, reconnecting and host changes trigger
+the same recovery barrier. The window shows scene progress, terrain tile counts, reconnect countdown
+and persistent failure details, with a full resynchronisation action.
+
+The host is also the scribe: only it saves the scene and TerrainData to disk. If the host disconnects,
+the participant who has been connected longest takes over, and saving resumes only after recovery
+succeeds. A promoted host with an incomplete inbound recovery stays paused; restart the room from a
+complete scene and terrain copy. Everyone else's `Ctrl+S` is blocked with a warning.
 
 ---
 
@@ -110,13 +125,13 @@ that node's lock. Any participant may restructure — but only the host can save
 | Restoring a field to the prefab's default | **no** | the override is removed locally without an op, so a peer keeps the old override |
 | Joining after the session started | yes | the host streams its whole scene as a snapshot; the joiner ends up with the host's scene, not a merge |
 | Add / remove a component *of a prefab instance* | **no** | the instance's `addedObjects` list is not carried |
-| Terrain heightmap / splatmap | **yes**, host-only | stroke-sized region patches on their own channel: 16-bit height tiles, byte splat tiles; a guest whose resolution or layer count differs refuses the patch and says so |
+| Terrain heightmap / splatmap | **yes**, with automatic region leases | participants can sculpt and paint separate regions concurrently; 16-bit height tiles and byte splat tiles use their own channel; mismatched resolutions or layer counts block recovery; only the host saves TerrainData |
 | Terrain trees / details / holes | **no** | not on the channel yet |
 | Materials and other **assets** | **no** | shared through Git, by design |
 | Lightmap bake, NavMesh bake, terrain LOD | **no** | host bakes and saves, then Git |
 | More than one scene per session | **no** | one active scene; a different scene GUID is refused |
 | Undo / redo | **no** | each editor's undo stack stays local |
-| Saving the scene | **host only** | other editors' saves are blocked with a warning |
+| Saving the scene and TerrainData | **host only** | all saves pause during disconnect/recovery; other editors' saves are blocked with a warning |
 | Selection, cursor, inspector focus | **no** | not modelled |
 | Peer camera positions | yes, as an overlay | `view` messages draw a camera gizmo in the scene view; nothing is written to the scene |
 
@@ -203,9 +218,11 @@ in `Packages/manifest.json`:
 7. **v0.4.4** — abandoned rooms are dropped when the last participant leaves. ✅
 8. **v0.4.3** — late-joiner snapshot, prefab override promotion, peer scene-view cameras.
 6. **v0.5** — terrain: heightmap and splatmap region deltas over a dedicated channel. ✅ (trees,
-   details, holes and a terrain lock are still open)
+   details and holes are still open)
 7. **v0.5.x** — `samples~` demo scene, prefab-instance structural edits (`addedObjects`).
-7. **v1.0** — first-run wizard (Lv1 host mode: server spawned locally, 6-digit code).
+8. **v0.6.0** — protocol 2, automatic terrain-region leases, recovery barrier and recovery UI. ✅
+   Real multi-editor interaction and external-network performance validation remain pending.
+9. **v1.0** — first-run wizard (Lv1 host mode: server spawned locally, 6-digit code).
 
 ## License
 

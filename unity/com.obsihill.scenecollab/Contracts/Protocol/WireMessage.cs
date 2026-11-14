@@ -43,7 +43,7 @@ namespace SceneCollab.Contracts.Protocol
         /// <summary>Authoritative revision the sender had applied when it produced the op.</summary>
         public long revision;
 
-        /// <summary>Client-generated idempotency key for operations.</summary>
+        /// <summary>Client-generated scene operation idempotency key; correlation id for terrain requests/ACKs.</summary>
         public string opId;
 
         /// <summary>Stable node id (GlobalObjectId hash). Never a fileID.</summary>
@@ -168,6 +168,12 @@ namespace SceneCollab.Contracts.Protocol
         /// </summary>
         public bool snapshot;
 
+        /// <summary>Server-assigned room recovery epoch; required on snapshot data and sync replies.</summary>
+        public string syncId;
+
+        /// <summary>Accepted terrain patch count for this recovery epoch, carried by sync_end.</summary>
+        public int syncTerrainTiles;
+
         // ── v0.5: terrain patches ────────────────────────────────────────────────
         //
         // A terrain's heights and splat weights live in a TerrainData *asset*, not in the scene, so
@@ -206,6 +212,18 @@ namespace SceneCollab.Contracts.Protocol
 
         /// <summary>Base64 payload: 16-bit rows for heights, one byte per weight for splats.</summary>
         public string terrainPayload;
+
+        /// <summary>Server-assigned lease; omit on initial lock, required on live patches, expansion and unlock.</summary>
+        public string terrainLeaseId;
+
+        /// <summary>Lease rectangle in the normalized 16x16 sector grid, not sample coordinates.</summary>
+        public int regionX;
+        public int regionZ;
+        public int regionWidth;
+        public int regionHeight;
+
+        /// <summary>Complete authoritative terrain lease list (welcome and terrain_locks).</summary>
+        public TerrainRegionLease[] terrainLocks;
     }
 
     /// <summary>

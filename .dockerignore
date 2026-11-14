@@ -1,5 +1,11 @@
 bin/
 obj/
+**/bin/
+**/obj/
+artifacts/
+.git/
+.codex/
+.agents/
 data/
 .env
 *.user

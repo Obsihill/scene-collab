@@ -33,12 +33,15 @@ namespace SceneCollab.Editor.Tests
                 AssetDatabase.CreateFolder("Assets", "__collab_snapshot_tests");
             }
 
-            _scene = SceneManager.GetActiveScene();
+            // Other fixtures intentionally leave prefab stand-ins behind after deleting test assets.
+            // Snapshot completeness must be checked against this fixture's scene only.
+            _scene = EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Single);
         }
 
         [TearDown]
         public void TearDown()
         {
+            EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Single);
             for (var i = 0; i < _createdAssets.Count; i++)
             {
                 AssetDatabase.DeleteAsset(_createdAssets[i]);
@@ -116,6 +119,7 @@ namespace SceneCollab.Editor.Tests
                         break;
 
                     case OpKinds.SnapshotEnd:
+                        Assert.IsTrue(receiver.TryComplete(applier), receiver.LastError);
                         claimed = receiver.End();
                         break;
                 }
@@ -273,6 +277,41 @@ namespace SceneCollab.Editor.Tests
             Assert.IsFalse(receiver.ApplyChunk("{}", applier));
             Assert.IsNotNull(receiver.LastError);
             Assert.IsFalse(receiver.Active);
+        }
+
+        [Test]
+        public void ReceiverCannotFinishWithMissingOrDuplicateChunks()
+        {
+            var registry = new SceneNodeRegistry();
+            var applier = new SceneOpApplier(registry, new SceneDiff(), new SceneStructure(registry));
+            var receiver = new SnapshotReceiver();
+            receiver.Begin();
+            var first = JsonUtility.ToJson(new SnapshotChunk { index = 0, total = 2, ops = new WireMessage[0] });
+            Assert.IsTrue(receiver.ApplyChunk(first, applier));
+            Assert.IsFalse(receiver.TryComplete(applier));
+            Assert.IsFalse(receiver.ApplyChunk(first, applier), "a repeated frame cannot count twice");
+            Assert.IsFalse(receiver.ApplyChunk(JsonUtility.ToJson(new SnapshotChunk
+                { index = 1, total = 3, ops = new WireMessage[0] }), applier), "total cannot change mid-transfer");
+            Assert.IsTrue(receiver.ApplyChunk(JsonUtility.ToJson(new SnapshotChunk
+                { index = 1, total = 2, ops = new WireMessage[0] }), applier));
+            Assert.IsTrue(receiver.TryComplete(applier));
+        }
+
+        [Test]
+        public void ReceiverFailsCompletionWhenAFieldStillCannotResolve()
+        {
+            var registry = new SceneNodeRegistry();
+            var applier = new SceneOpApplier(registry, new SceneDiff(), new SceneStructure(registry));
+            var receiver = new SnapshotReceiver();
+            receiver.Begin();
+            Assert.IsTrue(receiver.ApplyChunk(JsonUtility.ToJson(new SnapshotChunk
+            {
+                index = 0, total = 1, ops = new[] { new WireMessage { opKind = OpKinds.SetProperty,
+                    nodeId = "missing", propertyPath = ScenePropertyAccess.LocalPosition, newValue = "1,2,3" } }
+            }), applier));
+            Assert.IsFalse(receiver.TryComplete(applier));
+            Assert.IsFalse(receiver.IsComplete);
+            StringAssert.Contains("could not be applied", receiver.LastError);
         }
     }
 }

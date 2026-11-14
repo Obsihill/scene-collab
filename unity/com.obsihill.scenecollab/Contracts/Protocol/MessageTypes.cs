@@ -32,6 +32,15 @@ namespace SceneCollab.Contracts.Protocol
         /// tiles that must not each cost a revision.
         /// </summary>
         public const string Terrain = "terrain";
+
+        public const string TerrainLock = "terrain_lock";
+        public const string TerrainUnlock = "terrain_unlock";
+        public const string TerrainLocks = "terrain_locks";
+        public const string TerrainAck = "terrain_ack";
+        public const string SyncRequest = "sync_request";
+        public const string SyncBegin = "sync_begin";
+        public const string SyncEnd = "sync_end";
+        public const string SyncReady = "sync_ready";
     }
 
     /// <summary>Values for <see cref="WireMessage.code"/>.</summary>
@@ -52,6 +61,12 @@ namespace SceneCollab.Contracts.Protocol
 
         /// <summary>Only the host may perform this action (saving, publishing the asset manifest).</summary>
         public const string NotHost = "not_host";
+
+        public const string SyncInProgress = "sync_in_progress";
+        public const string SyncMismatch = "sync_mismatch";
+        public const string SyncIncomplete = "sync_incomplete";
+        public const string SyncFailed = "sync_failed";
+        public const string TerrainLeaseInvalid = "terrain_lease_invalid";
     }
 
     /// <summary>

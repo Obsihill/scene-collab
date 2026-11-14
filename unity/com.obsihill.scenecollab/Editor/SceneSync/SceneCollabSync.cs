@@ -19,7 +19,7 @@ namespace SceneCollab.Editor.SceneSync
     /// full values, not deltas, so resending after a rejection is safe — and that is why a rejected op
     /// costs a round trip, not correctness.
     /// </summary>
-    public sealed class SceneCollabSync : IDisposable
+    public sealed partial class SceneCollabSync : IDisposable
     {
         public const double TickIntervalSeconds = 0.1;
 
@@ -67,6 +67,7 @@ namespace SceneCollab.Editor.SceneSync
             // Reference fields travel as node ids, so the diff needs the registry that mints them.
             _diff.Registry = _registry;
             _feed.UndoRedoPerformed += OnUndoRedo;
+            _terrain.Failed += OnTerrainFailure;
             SnapshotDeletesExtras = true;
         }
 
@@ -236,13 +237,17 @@ namespace SceneCollab.Editor.SceneSync
             _session.LocksChanged += OnLocksChanged;
             _session.AssetManifestChanged += OnAssetManifestChanged;
             _session.ParticipantsChanged += OnParticipantsChanged;
+            _session.ErrorReceived += OnSessionError;
+            _control = session as ICollabControlSession;
+            if (_control != null) _control.ControlReceived += OnControlReceived;
             _presence.Bind(_session);
-            _terrain.Bind(_session);
+            if (Enabled) _terrain.Bind(_session);
         }
 
         public void Unbind()
         {
             _positions.Finish();
+            RollbackPendingProperties();
             if (_session != null)
             {
                 _session.OperationReceived -= OnOperationReceived;
@@ -251,7 +256,15 @@ namespace SceneCollab.Editor.SceneSync
                 _session.LocksChanged -= OnLocksChanged;
                 _session.AssetManifestChanged -= OnAssetManifestChanged;
                 _session.ParticipantsChanged -= OnParticipantsChanged;
+                _session.ErrorReceived -= OnSessionError;
             }
+            if (_control != null) _control.ControlReceived -= OnControlReceived;
+            _control = null;
+            _seenConnected = _canSupplyRecovery = false;
+            _retiredOperations.Clear();
+            _editingGate.SetBlocked(false);
+            SceneSaveGuard.RecoveryBlocked = false;
+            ResetPending();
 
             _snapshotOutbox.Clear();
             _peersSeen.Clear();
@@ -271,6 +284,13 @@ namespace SceneCollab.Editor.SceneSync
             }
 
             Enabled = true;
+            _retiredOperations.Clear();
+            if (!_seenConnected && _session != null && _session.State == CollabConnectionState.Connected)
+            {
+                _seenConnected = true;
+                _canSupplyRecovery = _session.IsHost;
+            }
+            _terrain.Bind(_session);
             _awaitingAck = false;
             _outbox.Clear();
             _snapshotOutbox.Clear();
@@ -282,6 +302,7 @@ namespace SceneCollab.Editor.SceneSync
             _wasHost = _session != null && _session.IsHost;
             _nextExternalCheck = 0;
             SceneSaveGuard.Install();
+            SceneSaveGuard.SaveBlocked += OnSaveBlocked;
             PrimeActiveScene();
 
             _feed.Attach();
@@ -296,6 +317,12 @@ namespace SceneCollab.Editor.SceneSync
 
             UpdateSaveGuard();
             LastNote = "syncing";
+            if (_control != null)
+            {
+                PauseEditing("동기화 준비 중");
+                RetryRecovery();
+                return;
+            }
             if (_session != null && _session.State == CollabConnectionState.Connected)
             {
                 if (_session.IsHost) _terrain.RequestFullSync();
@@ -311,6 +338,13 @@ namespace SceneCollab.Editor.SceneSync
             }
 
             Enabled = false;
+            RollbackPendingProperties();
+            _editingGate.SetBlocked(false);
+            _recoveryPhase = RecoveryPhase.Off;
+            _terrain.EditingAllowed = false;
+            SceneSaveGuard.RecoveryBlocked = false;
+            SceneSaveGuard.SaveBlocked -= OnSaveBlocked;
+            ResetPending();
             _positions.Finish();
             _outbox.Clear();
             _awaitingAck = false;
@@ -329,7 +363,7 @@ namespace SceneCollab.Editor.SceneSync
             }
 
             _feed.Detach();
-            _terrain.Reset();
+            _terrain.Unbind();
             SceneSaveGuard.Uninstall();
             LastNote = "off";
         }
@@ -339,6 +373,8 @@ namespace SceneCollab.Editor.SceneSync
             Disable();
             Unbind();
             _feed.UndoRedoPerformed -= OnUndoRedo;
+            _terrain.Failed -= OnTerrainFailure;
+            _editingGate.Dispose();
         }
 
         // ── local edits → ops ──────────────────────────────────────────────────
@@ -476,7 +512,7 @@ namespace SceneCollab.Editor.SceneSync
                     continue;
                 }
 
-                _outbox.Enqueue(operation);
+                EnqueueLocal(operation);
                 _undo.NoteWrite(operation.NodeId, operation.PropertyPath, selfId);
                 published++;
             }
@@ -562,6 +598,7 @@ namespace SceneCollab.Editor.SceneSync
 
             var now = EditorApplication.timeSinceStartup;
             _positions.Tick(now);
+            if (_control != null) TickRecovery(now);
 
             // A scene file that changed without a save here means another tool (or another editor) wrote
             // it. Checked on a slow clock because it hashes the file; reported, never auto-reverted.
@@ -584,17 +621,14 @@ namespace SceneCollab.Editor.SceneSync
                 CollabPlaceholders.Revalidate(RestorePrefabStandIn);
             }
 
-            if (_session == null || _session.State != CollabConnectionState.Connected)
-            {
-                return;
-            }
-
             if (now < _nextTick)
             {
                 return;
             }
 
             _nextTick = now + TickIntervalSeconds;
+            if (_control != null && !CanEdit) _editingGate.Refresh();
+            if (_session == null || _session.State != CollabConnectionState.Connected) return;
 
             // Camera presence runs on the same clock but is not gated by a primed scene: a guest can see
             // where the host is looking before it has a single node id.
@@ -603,6 +637,14 @@ namespace SceneCollab.Editor.SceneSync
             // Terrain is likewise independent of the node graph: it is an asset, not a node, and a
             // room whose scene is still unprimed can already sculpt the same terrain.
             _terrain.Tick();
+            if (_control != null && !CanEdit)
+            {
+                _dirty.Clear();
+                _feed.Drain(_dirty);
+                PumpOutbox();
+                UpdateReadiness(now);
+                return;
+            }
 
             if (!_primed)
             {
@@ -653,7 +695,7 @@ namespace SceneCollab.Editor.SceneSync
                 for (var j = 0; j < _operations.Count; j++)
                 {
                     var operation = _operations[j];
-                    _outbox.Enqueue(operation);
+                    EnqueueLocal(operation);
 
                     // Ownership is what an undo is checked against later: this field is ours until a
                     // peer's op for the same path lands.
@@ -693,6 +735,7 @@ namespace SceneCollab.Editor.SceneSync
         /// </summary>
         public void CollectStructure()
         {
+            if (_control != null && !CanEdit) return;
             var scene = SceneManager.GetActiveScene();
             if (!scene.IsValid() || !scene.isLoaded)
             {
@@ -710,7 +753,7 @@ namespace SceneCollab.Editor.SceneSync
 
                 _diff.Forget(nodeId);
                 var removeOp = _structure.BuildRemove(nodeId, "");
-                _outbox.Enqueue(removeOp);
+                EnqueueLocal(removeOp);
                 StructureSent++;
                 LastNote = "removed node " + nodeId;
             }
@@ -734,7 +777,7 @@ namespace SceneCollab.Editor.SceneSync
                 }
 
                 _diff.Baseline(gameObject, nodeId);
-                _outbox.Enqueue(addOp);
+                EnqueueLocal(addOp);
                 StructureSent++;
                 LastNote = "added " + gameObject.name;
             }
@@ -760,7 +803,7 @@ namespace SceneCollab.Editor.SceneSync
                 SceneOperation moveOp;
                 if (_structure.TryCollectMove(gameObject, nodeId, out moveOp))
                 {
-                    _outbox.Enqueue(moveOp);
+                    EnqueueLocal(moveOp);
                     StructureSent++;
                     LastNote = "moved " + gameObject.name;
                 }
@@ -769,7 +812,7 @@ namespace SceneCollab.Editor.SceneSync
                 var addedComponents = false;
                 for (var c = 0; c < componentOps.Count; c++)
                 {
-                    _outbox.Enqueue(componentOps[c]);
+                    EnqueueLocal(componentOps[c]);
                     StructureSent++;
                     LastNote = componentOps[c].Kind + " " + componentOps[c].ComponentType
                         + " on " + gameObject.name;
@@ -789,7 +832,7 @@ namespace SceneCollab.Editor.SceneSync
                     var values = _diff.CollectAll(gameObject, nodeId);
                     for (var v = 0; v < values.Count; v++)
                     {
-                        _outbox.Enqueue(values[v]);
+                        EnqueueLocal(values[v]);
                     }
                 }
             }
@@ -862,11 +905,18 @@ namespace SceneCollab.Editor.SceneSync
 
             if (_snapshotOutbox.Count > 0)
             {
+                if (_control != null && _recoveryPhase != RecoveryPhase.Scene) return;
                 var frame = _snapshotOutbox.Dequeue();
+                if (_control != null) frame.syncId = _syncId;
+                frame.opId = Guid.NewGuid().ToString("N");
+                _awaitedOpId = frame.opId;
+                _sentAt = EditorApplication.timeSinceStartup;
+                _lastSnapshotKind = frame.opKind;
                 if (!_session.SendSnapshotFrame(frame))
                 {
                     _snapshotOutbox.Clear();
                     LastNote = "not connected; snapshot dropped";
+                    FailRecovery("장면 스냅샷 전송 실패: 다시 동기화하세요.");
                     return;
                 }
 
@@ -882,15 +932,23 @@ namespace SceneCollab.Editor.SceneSync
                 return;
             }
 
-            if (_outbox.Count == 0)
+            if (_control != null && !CanEdit) return;
+            if (_outbox.Count == 0 && !_currentOperation.HasValue)
             {
                 return;
             }
 
-            var operation = _outbox.Dequeue();
-            if (!_session.SendOperation(operation))
+            var operation = _currentOperation ?? _outbox.Dequeue();
+            _currentOperation = operation;
+            _awaitedOpId = Guid.NewGuid().ToString("N");
+            _sentAt = EditorApplication.timeSinceStartup;
+            var sent = _control != null
+                ? _control.SendControl(operation.ToWire(_session.ClientId, _session.RoomName, _session.Revision, _awaitedOpId))
+                : _session.SendOperation(operation);
+            if (!sent)
             {
                 LastNote = "not connected; dropped " + operation;
+                FailRecovery("전송 실패: 재연결 후 동기화 필요");
                 return;
             }
 
@@ -909,6 +967,9 @@ namespace SceneCollab.Editor.SceneSync
             }
 
             _lastInbound = EditorApplication.timeSinceStartup;
+            if (_control != null && OpKinds.IsSnapshot(message.opKind) && message.syncId != _syncId) return;
+            if (_control != null && OpKinds.IsSnapshot(message.opKind) && _recoveryPhase == RecoveryPhase.Failed) return;
+            _lastRecoveryProgress = _lastInbound;
 
             switch (message.opKind)
             {
@@ -932,6 +993,7 @@ namespace SceneCollab.Editor.SceneSync
             GameObject positionObject = null;
             Vector3 previousPosition = default(Vector3);
             var smoothPosition = Enabled && !message.snapshot
+                && !_pendingProperties.ContainsKey(message.nodeId + "|" + message.propertyPath)
                 && (message.opKind == OpKinds.SetProperty || message.opKind == OpKinds.SetPrefabOverride)
                 && message.propertyPath == ScenePropertyAccess.LocalPosition
                 && _registry.TryResolve(message.nodeId, out positionObject) && positionObject != null
@@ -942,9 +1004,9 @@ namespace SceneCollab.Editor.SceneSync
                 _positions.Finish();
 
             string note;
-            if (!_applier.Apply(message, out note) && note != null)
+            if (!_applier.Apply(message, out note))
             {
-                if (note.StartsWith("unknown node", StringComparison.Ordinal) && !_primed)
+                if (note != null && note.StartsWith("unknown node", StringComparison.Ordinal) && !_primed)
                 {
                     // The op beat our baseline (fresh connect). Prime once and retry.
                     PrimeActiveScene();
@@ -956,7 +1018,8 @@ namespace SceneCollab.Editor.SceneSync
                     }
                 }
 
-                LastNote = note;
+                LastNote = note ?? "remote operation could not be applied";
+                if (_control != null && Enabled) FailRecovery("원격 장면 적용 실패: " + LastNote);
                 return;
             }
 
@@ -972,6 +1035,9 @@ namespace SceneCollab.Editor.SceneSync
         /// </summary>
         void NoteApplied(WireMessage message)
         {
+            PendingProperty pending;
+            if (_pendingProperties.TryGetValue(message.nodeId + "|" + message.propertyPath, out pending))
+                pending.Confirmed = message.newValue;
             if (message.opKind == OpKinds.RemoveNode)
             {
                 _undo.Forget(message.nodeId);
@@ -983,7 +1049,10 @@ namespace SceneCollab.Editor.SceneSync
 
         void OnOperationAcknowledged(WireMessage message)
         {
+            if (_control != null && ResolveRetiredOperation(message)) return;
+            if (_control != null && (!_awaitingAck || message == null || message.opId != _awaitedOpId)) return;
             _awaitingAck = false;
+            _lastRecoveryProgress = EditorApplication.timeSinceStartup;
 
             if (_snapshotInFlight)
             {
@@ -992,7 +1061,10 @@ namespace SceneCollab.Editor.SceneSync
                 if (_terrainAfterSnapshot && message != null && (message.accepted || message.duplicate))
                 {
                     // The guest can now resolve Terrain components created by the scene snapshot.
-                    _terrain.RequestFullSync();
+                    _sceneComplete = true;
+                    _terrainTransferStarted = true;
+                    if (_control != null) _terrain.RequestFullSync(_syncId);
+                    else _terrain.RequestFullSync();
                 }
                 _terrainAfterSnapshot = false;
 
@@ -1004,6 +1076,7 @@ namespace SceneCollab.Editor.SceneSync
                     _snapshotOutbox.Clear();
                     SnapshotFailures++;
                     LastNote = "snapshot aborted: " + (message.code ?? "unknown");
+                    FailRecovery(LastNote);
                 }
 
                 PumpOutbox();
@@ -1017,8 +1090,20 @@ namespace SceneCollab.Editor.SceneSync
 
                 // Do not retry blindly: the next diff produces the current value against the new
                 // revision, which is exactly what the server wants.
-                _outbox.Clear();
+                if (_currentOperation.HasValue && message.code == ErrorCodes.StaleRevision && _staleRetries++ < 3)
+                {
+                    PumpOutbox();
+                    return;
+                }
+                RollbackPendingProperties();
+                ResetPending();
+                FailRecovery(LastNote);
+                return;
             }
+
+            if (_currentOperation.HasValue) ConfirmProperty(_currentOperation.Value);
+            _currentOperation = null;
+            _staleRetries = 0;
 
             PumpOutbox();
         }
@@ -1027,6 +1112,31 @@ namespace SceneCollab.Editor.SceneSync
         {
             var connected = _session != null && _session.State == CollabConnectionState.Connected;
             var isHost = connected && _session.IsHost;
+            if (_control != null && Enabled)
+            {
+                if (connected && !_seenConnected)
+                {
+                    _seenConnected = true;
+                    _canSupplyRecovery = isHost; // Only a fresh room's first host supplies its local baseline.
+                }
+                if (!connected)
+                {
+                    RollbackPendingProperties();
+                    ResetPending();
+                    _syncId = null;
+                    _snapshot.Abort();
+                    PauseEditing("연결 끊김: 재연결 및 전체 동기화 완료 후 편집을 재개합니다");
+                    _recoveryPhase = RecoveryPhase.Disconnected;
+                }
+                else if (_wasHost != isHost || _recoveryPhase == RecoveryPhase.Disconnected)
+                {
+                    PauseEditing("참여자 권한 확인 및 재동기화 대기");
+                    _recoveryPhase = RecoveryPhase.Requesting;
+                }
+                _wasHost = isHost;
+                UpdateSaveGuard();
+                return;
+            }
 
             if (isHost && !_wasHost && Enabled)
             {
@@ -1073,6 +1183,7 @@ namespace SceneCollab.Editor.SceneSync
 
         void OnParticipantsChanged()
         {
+            if (_control != null) return; // The server starts a single ordered recovery epoch for the room.
             if (_session == null || !Enabled)
             {
                 return;
@@ -1122,6 +1233,7 @@ namespace SceneCollab.Editor.SceneSync
         /// <summary>Guest side: tell the host this editor has nothing and wants a baseline.</summary>
         public void RequestSnapshot()
         {
+            if (_control != null) { RetryRecovery(); return; }
             if (_session == null || _session.State != CollabConnectionState.Connected || _snapshotRequested)
             {
                 return;
@@ -1143,12 +1255,17 @@ namespace SceneCollab.Editor.SceneSync
         /// <summary>Host side: build the whole scene into frames and queue them one ack at a time.</summary>
         public bool QueueSnapshot(string reason)
         {
+            if (_control != null && _recoveryPhase != RecoveryPhase.Scene)
+            {
+                RetryRecovery();
+                return false;
+            }
             if (_session == null || _session.State != CollabConnectionState.Connected)
             {
                 return false;
             }
 
-            if (_session.IsHost)
+            if (_session.IsHost && _control == null)
             {
                 // Scene snapshots carry references to TerrainData, not its samples. Restart even
                 // when a scene snapshot is already queued: this requester may have missed tiles.
@@ -1164,6 +1281,7 @@ namespace SceneCollab.Editor.SceneSync
 
             List<WireMessage> frames;
             string note;
+            _positions.Finish();
             if (!SceneSnapshot.TryBuild(SceneManager.GetActiveScene(), _registry, out frames, out note))
             {
                 LastNote = "snapshot skipped: " + note;
@@ -1174,6 +1292,7 @@ namespace SceneCollab.Editor.SceneSync
             {
                 _snapshotOutbox.Enqueue(frames[i]);
             }
+            _sceneFramesTotal = frames.Count;
 
             LastNote = "snapshot queued (" + reason + "): " + note;
             return true;
@@ -1202,6 +1321,7 @@ namespace SceneCollab.Editor.SceneSync
             {
                 LastNote = "snapshot: " + (_snapshot.LastError ?? "unreadable chunk");
                 _snapshot.Abort();
+                FailRecovery(LastNote);
                 return;
             }
 
@@ -1216,7 +1336,15 @@ namespace SceneCollab.Editor.SceneSync
                 return;
             }
 
+            if (!_snapshot.TryComplete(_applier))
+            {
+                FailRecovery(_snapshot.LastError ?? "장면 스냅샷이 완전하지 않습니다");
+                _snapshot.Abort();
+                return;
+            }
             var claimed = _snapshot.End();
+            _sceneComplete = true;
+            if (_control != null) _recoveryPhase = RecoveryPhase.Terrain;
             var ops = _snapshot.Ops;
             var removed = RemoveExtras(claimed);
 
@@ -1317,7 +1445,8 @@ namespace SceneCollab.Editor.SceneSync
             var connected = Enabled && _session != null
                 && _session.State == CollabConnectionState.Connected;
 
-            SceneSaveGuard.BlockNonScribeSaves = connected && !_session.IsHost;
+            SceneSaveGuard.RecoveryBlocked = Enabled && _control != null && !CanEdit;
+            SceneSaveGuard.BlockNonScribeSaves = Enabled && _session != null && !_session.IsHost;
 
             // The new host may save only once it has caught up: a partial scene written to Git is the
             // one failure this design cannot undo, because the file is the source of truth for everyone

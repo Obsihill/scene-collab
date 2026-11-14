@@ -20,7 +20,7 @@ namespace SceneCollab.Editor
     /// learns is queued and replayed on the main thread from <c>EditorApplication.update</c>.
     /// Events therefore always fire on the main thread, in order.
     /// </summary>
-    public sealed class CollabSession : ISceneCollabSession, IDisposable
+    public sealed class CollabSession : ISceneCollabSession, ICollabControlSession, IDisposable
     {
         enum InboundKind
         {
@@ -39,6 +39,7 @@ namespace SceneCollab.Editor
             public string Text;
             public string Detail;
             public WireMessage Message;
+            public CancellationToken Cancellation;
         }
 
         const int ReceiveBufferBytes = 16 * 1024;
@@ -117,6 +118,9 @@ namespace SceneCollab.Editor
         public event Action LocksChanged;
         public event Action<int> AssetCountChanged;
         public event Action AssetManifestChanged;
+        public event Action<WireMessage> ControlReceived;
+        public double RetryAt { get; private set; }
+        public string LastConnectionError { get; private set; }
 
         public CollabSession()
         {
@@ -144,6 +148,8 @@ namespace SceneCollab.Editor
 
             RoomName = string.IsNullOrEmpty(settings.room) ? "default" : settings.room;
             _keepAliveWanted = true;
+            RetryAt = 0;
+            LastConnectionError = null;
             TouchInbound();
             SetState(CollabConnectionState.Connecting);
             AttachPump();
@@ -223,8 +229,7 @@ namespace SceneCollab.Editor
 
             // Client-generated idempotency key: a reconnect replay of the same op must not apply twice.
             var opId = Guid.NewGuid().ToString("N");
-            Send(operation.ToWire(ClientId, RoomName, Revision, opId));
-            return true;
+            return Send(operation.ToWire(ClientId, RoomName, Revision, opId));
         }
 
         /// <summary>
@@ -244,11 +249,10 @@ namespace SceneCollab.Editor
             frame.clientId = ClientId;
             frame.room = RoomName;
             frame.revision = Revision;
-            frame.opId = Guid.NewGuid().ToString("N");
+            if (string.IsNullOrEmpty(frame.opId)) frame.opId = Guid.NewGuid().ToString("N");
             frame.displayName = _displayName;
             frame.snapshot = true;
-            Send(frame);
-            return true;
+            return Send(frame);
         }
 
         /// <summary>
@@ -307,8 +311,19 @@ namespace SceneCollab.Editor
             patch.displayName = _displayName;
             patch.sceneGuid = SceneGuid;
             patch.terrainValid = true;
-            Send(patch);
-            return true;
+            return Send(patch);
+        }
+
+        public bool SendControl(WireMessage message)
+        {
+            if (State != CollabConnectionState.Connected || message == null) return false;
+            message.clientId = ClientId;
+            message.room = RoomName;
+            message.sceneGuid = SceneGuid;
+            message.displayName = _displayName;
+            message.revision = Revision;
+            if (string.IsNullOrEmpty(message.opId)) message.opId = Guid.NewGuid().ToString("N");
+            return Send(message);
         }
 
         /// <summary>
@@ -406,11 +421,11 @@ namespace SceneCollab.Editor
 
                 UnityEngine.Debug.Log("[scene-collab] connection lost; retrying in " + delay + " s");
 
-                _inbox.Enqueue(new Inbound
+                QueueInbound(new Inbound
                 {
                     Kind = InboundKind.Reconnecting,
                     Detail = delay.ToString(),
-                });
+                }, token);
 
                 try
                 {
@@ -442,11 +457,12 @@ namespace SceneCollab.Editor
                 }
 
                 await socket.ConnectAsync(new Uri(connectionUrl), token).ConfigureAwait(false);
+                token.ThrowIfCancellationRequested();
                 opened = true;
                 TouchInbound();
 
                 _socket = socket;
-                _inbox.Enqueue(new Inbound
+                QueueInbound(new Inbound
                 {
                     Kind = InboundKind.SocketOpened,
                     Message = new WireMessage
@@ -459,7 +475,7 @@ namespace SceneCollab.Editor
                         scenePath = identity.path,
                         sceneName = identity.name,
                     },
-                });
+                }, token);
                 await ReceiveLoopAsync(socket, token).ConfigureAwait(false);
             }
             catch (OperationCanceledException)
@@ -472,11 +488,11 @@ namespace SceneCollab.Editor
                 // the run loop is about to reconnect.
                 if (_keepAliveWanted)
                 {
-                    _inbox.Enqueue(new Inbound { Kind = InboundKind.Closed, Detail = ex.Message });
+                    QueueInbound(new Inbound { Kind = InboundKind.Closed, Detail = ex.Message }, token);
                 }
                 else
                 {
-                    _inbox.Enqueue(new Inbound { Kind = InboundKind.Fault, Detail = ex.Message });
+                    QueueInbound(new Inbound { Kind = InboundKind.Fault, Detail = ex.Message }, token);
                 }
             }
             finally
@@ -524,7 +540,7 @@ namespace SceneCollab.Editor
                 result = await socket.ReceiveAsync(new ArraySegment<byte>(buffer), token).ConfigureAwait(false);
                 if (result.MessageType == WebSocketMessageType.Close)
                 {
-                    _inbox.Enqueue(new Inbound { Kind = InboundKind.Closed, Detail = result.CloseStatusDescription });
+                    QueueInbound(new Inbound { Kind = InboundKind.Closed, Detail = result.CloseStatusDescription }, token);
                     return;
                 }
 
@@ -542,7 +558,7 @@ namespace SceneCollab.Editor
                         result = await socket.ReceiveAsync(new ArraySegment<byte>(buffer), token).ConfigureAwait(false);
                         if (result.MessageType == WebSocketMessageType.Close)
                         {
-                            _inbox.Enqueue(new Inbound { Kind = InboundKind.Closed, Detail = result.CloseStatusDescription });
+                            QueueInbound(new Inbound { Kind = InboundKind.Closed, Detail = result.CloseStatusDescription }, token);
                             return;
                         }
 
@@ -560,10 +576,10 @@ namespace SceneCollab.Editor
                     await SendTextAsync(socket, PongFrameJson, token).ConfigureAwait(false);
                     continue;
                 }
-                _inbox.Enqueue(new Inbound { Kind = InboundKind.Text, Text = text });
+                QueueInbound(new Inbound { Kind = InboundKind.Text, Text = text }, token);
             }
 
-            _inbox.Enqueue(new Inbound { Kind = InboundKind.Closed });
+            QueueInbound(new Inbound { Kind = InboundKind.Closed }, token);
         }
 
         async Task SendTextAsync(WebSocket socket, string json, CancellationToken token)
@@ -590,7 +606,7 @@ namespace SceneCollab.Editor
             }
             catch (Exception ex)
             {
-                _inbox.Enqueue(new Inbound { Kind = InboundKind.Error, Detail = "send failed: " + ex.Message });
+                QueueInbound(new Inbound { Kind = InboundKind.Error, Detail = "send failed: " + ex.Message }, token);
             }
             finally
             {
@@ -601,12 +617,12 @@ namespace SceneCollab.Editor
             }
         }
 
-        void Send(WireMessage message)
+        bool Send(WireMessage message)
         {
             var socket = _socket;
             if (socket == null || socket.State != WebSocketState.Open)
             {
-                return;
+                return false;
             }
 
             var token = _cancellation == null ? CancellationToken.None : _cancellation.Token;
@@ -614,9 +630,17 @@ namespace SceneCollab.Editor
             // Enter the send gate in call order. Scheduling each message on the thread pool can
             // reorder overlapping terrain snapshots and live edits before they reach the socket.
             _ = SendTextAsync(socket, json, token);
+            return true;
         }
 
         // ── main thread side ───────────────────────────────────────────────────
+
+        void QueueInbound(Inbound item, CancellationToken token)
+        {
+            if (token.IsCancellationRequested) return;
+            item.Cancellation = token;
+            _inbox.Enqueue(item);
+        }
 
         void AttachPump()
         {
@@ -645,6 +669,7 @@ namespace SceneCollab.Editor
             Inbound item;
             while (_inbox.TryDequeue(out item))
             {
+                if (item.Cancellation.IsCancellationRequested) continue;
                 switch (item.Kind)
                 {
                     case InboundKind.SocketOpened:
@@ -669,6 +694,8 @@ namespace SceneCollab.Editor
                         break;
 
                     case InboundKind.Reconnecting:
+                        int delay;
+                        RetryAt = EditorApplication.timeSinceStartup + (int.TryParse(item.Detail, out delay) ? delay : 1);
                         SetState(CollabConnectionState.Connecting);
                         break;
 
@@ -754,6 +781,7 @@ namespace SceneCollab.Editor
             switch (message.type)
             {
                 case MessageTypes.Welcome:
+                    RetryAt = 0;
                     ClientId = message.clientId;
                     IsScribe = message.isScribe;
                     IsHost = message.isHost;
@@ -801,6 +829,18 @@ namespace SceneCollab.Editor
                     }
 
                     ReplaceParticipants(message.participants);
+                    break;
+
+                case MessageTypes.TerrainLock:
+                case MessageTypes.TerrainUnlock:
+                case MessageTypes.TerrainLocks:
+                case MessageTypes.TerrainAck:
+                case MessageTypes.SyncBegin:
+                case MessageTypes.SyncEnd:
+                case MessageTypes.SyncReady:
+                    if (message.revision > Revision) Revision = message.revision;
+                    var controlHandler = ControlReceived;
+                    if (controlHandler != null) controlHandler(message);
                     break;
 
                 case MessageTypes.Ping:
@@ -866,6 +906,8 @@ namespace SceneCollab.Editor
                     break;
 
                 case MessageTypes.Error:
+                    var errorHandler = ControlReceived;
+                    if (errorHandler != null) errorHandler(message);
                     FireError(message.code, message.message);
                     break;
             }
@@ -877,6 +919,23 @@ namespace SceneCollab.Editor
             if (participants != null)
             {
                 _participants.AddRange(participants);
+            }
+
+            // Presence is also the host-election result; Welcome is not sent again on promotion.
+            var wasHost = IsHost;
+            var wasScribe = IsScribe;
+            for (var i = 0; i < _participants.Count; i++)
+            {
+                var participant = _participants[i];
+                if (participant == null || participant.clientId != ClientId) continue;
+                IsHost = participant.isHost;
+                IsScribe = participant.isScribe;
+                break;
+            }
+            if (State == CollabConnectionState.Connected && (wasHost != IsHost || wasScribe != IsScribe))
+            {
+                var handler = StateChanged;
+                if (handler != null) handler();
             }
 
             RaiseParticipantsChanged();
@@ -926,6 +985,7 @@ namespace SceneCollab.Editor
 
         void FireError(string code, string message)
         {
+            LastConnectionError = code + ": " + message;
             var handler = ErrorReceived;
             if (handler != null)
             {

@@ -1,6 +1,10 @@
 using System.IO;
+using System.Reflection;
 using NUnit.Framework;
 using SceneCollab.Editor.SceneSync;
+using UnityEditor;
+using UnityEngine;
+using UnityEngine.TestTools;
 
 namespace SceneCollab.Editor.Tests
 {
@@ -87,6 +91,36 @@ namespace SceneCollab.Editor.Tests
         {
             Assert.AreEqual(string.Empty, SceneSaveGuard.HashOf("C:/does/not/exist.unity"));
             Assert.AreEqual(string.Empty, SceneSaveGuard.HashOf(null));
+        }
+
+        [TestCase(true)]
+        [TestCase(false)]
+        public void PausedOrGuestSessionBlocksTerrainAndSceneSaves(bool recovering)
+        {
+            const string terrainPath = "Assets/__collab_save_guard_terrain.asset";
+            var terrain = new TerrainData { heightmapResolution = 33 };
+            AssetDatabase.CreateAsset(terrain, terrainPath);
+            try
+            {
+                SceneSaveGuard.RecoveryBlocked = recovering;
+                SceneSaveGuard.BlockNonScribeSaves = !recovering;
+                SceneSaveGuard.HostNotVerified = false;
+                var decision = recovering ? SaveGuardDecision.BlockRecovering : SaveGuardDecision.BlockGuest;
+                LogAssert.Expect(LogType.Warning, "[SceneCollab] " + SaveGuardPolicy.Describe(decision, Scene));
+                LogAssert.Expect(LogType.Warning, "[SceneCollab] " + SaveGuardPolicy.Describe(decision, terrainPath));
+                var hook = typeof(SceneSaveGuard).GetMethod("OnWillSaveAssets", BindingFlags.NonPublic | BindingFlags.Static);
+                var kept = (string[])hook.Invoke(null, new object[] { new[] { Scene, terrainPath, Material } });
+                CollectionAssert.AreEqual(new[] { Material }, kept);
+                Assert.AreEqual(decision, SceneSaveGuard.LastDecision);
+            }
+            finally
+            {
+                SceneSaveGuard.RecoveryBlocked = false;
+                SceneSaveGuard.BlockNonScribeSaves = false;
+                SceneSaveGuard.HostNotVerified = false;
+                SceneSaveGuard.Reset();
+                AssetDatabase.DeleteAsset(terrainPath);
+            }
         }
     }
 }

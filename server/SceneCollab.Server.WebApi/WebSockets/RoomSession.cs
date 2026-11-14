@@ -14,7 +14,7 @@ namespace SceneCollab.Server.WebApi.WebSockets
     /// <summary>
     /// One room: the authoritative document plus the sockets currently attached to it.
     /// </summary>
-    public sealed class RoomSession
+    public sealed partial class RoomSession
     {
         /// <summary>Guards against a client pushing a huge payload through before it is joined.</summary>
         const int MaxMessageBytes = 4 * 1024 * 1024;
@@ -23,6 +23,7 @@ namespace SceneCollab.Server.WebApi.WebSockets
         readonly SemaphoreSlim _operationGate = new SemaphoreSlim(1, 1);
         readonly Dictionary<string, ClientConnection> _clients =
             new Dictionary<string, ClientConnection>(StringComparer.Ordinal);
+        readonly Func<long> _utcNow;
 
         int _assetCount;
 
@@ -32,17 +33,11 @@ namespace SceneCollab.Server.WebApi.WebSockets
 
         const int MaxAssetGuids = 8192;
 
-        /// <summary>
-        /// Ceiling for one terrain tile's base64 payload. A 128x128 height tile is ~44k characters and
-        /// a splat tile is smaller, so anything past this is a peer trying to push a whole heightmap
-        /// through the relay in one frame.
-        /// </summary>
-        const int MaxTerrainPayloadChars = 64 * 1024;
-
-        public RoomSession(string key)
+        public RoomSession(string key, Func<long> utcNow = null)
         {
             Key = key;
             State = new RoomState();
+            _utcNow = utcNow ?? (() => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
         }
 
         public string Key { get; }
@@ -125,14 +120,14 @@ namespace SceneCollab.Server.WebApi.WebSockets
                     }
                     catch (JsonException)
                     {
-                        await SendErrorAsync(connection, ErrorCodes.Malformed, "invalid json", cancellationToken)
+                        await InOrderAsync(() => SendErrorAsync(connection, ErrorCodes.Malformed, "invalid json", CancellationToken.None), cancellationToken)
                             .ConfigureAwait(false);
                         continue;
                     }
 
                     if (message == null || string.IsNullOrEmpty(message.type))
                     {
-                        await SendErrorAsync(connection, ErrorCodes.Malformed, "missing type", cancellationToken)
+                        await InOrderAsync(() => SendErrorAsync(connection, ErrorCodes.Malformed, "missing type", CancellationToken.None, message), cancellationToken)
                             .ConfigureAwait(false);
                         continue;
                     }
@@ -155,7 +150,7 @@ namespace SceneCollab.Server.WebApi.WebSockets
                     {
                         if (message.type != MessageTypes.Hello)
                         {
-                            await SendErrorAsync(connection, ErrorCodes.NotInitialized, "send hello first", cancellationToken)
+                            await InOrderAsync(() => SendErrorAsync(connection, ErrorCodes.NotInitialized, "send hello first", CancellationToken.None), cancellationToken)
                                 .ConfigureAwait(false);
                             continue;
                         }
@@ -169,51 +164,13 @@ namespace SceneCollab.Server.WebApi.WebSockets
                         continue;
                     }
 
-                    switch (message.type)
-                    {
-                        case MessageTypes.Hello:
-                            await SendErrorAsync(connection, ErrorCodes.Malformed, "already joined", cancellationToken)
-                                .ConfigureAwait(false);
-                            break;
-
-                        case MessageTypes.Op:
-                            await HandleOpAsync(connection, message, cancellationToken).ConfigureAwait(false);
-                            break;
-
-                        case MessageTypes.Presence:
-                            if (State.UpdatePresence(connection.ClientId, message.selectedNodeIds))
-                            {
-                                await BroadcastPresenceAsync(null, cancellationToken).ConfigureAwait(false);
-                            }
-
-                            break;
-
-                        case MessageTypes.Lock:
-                            await HandleLockAsync(connection, message, false, cancellationToken).ConfigureAwait(false);
-                            break;
-
-                        case MessageTypes.Unlock:
-                            await HandleLockAsync(connection, message, true, cancellationToken).ConfigureAwait(false);
-                            break;
-
-                        case MessageTypes.Assets:
-                            await HandleAssetsAsync(connection, message, cancellationToken).ConfigureAwait(false);
-                            break;
-
-                        case MessageTypes.View:
-                            await HandleViewAsync(connection, message, cancellationToken).ConfigureAwait(false);
-                            break;
-
-                        case MessageTypes.Terrain:
-                            await HandleTerrainAsync(connection, message, cancellationToken).ConfigureAwait(false);
-                            break;
-
-                        default:
-                            await SendErrorAsync(connection, ErrorCodes.Malformed, "unknown type " + message.type, cancellationToken)
-                                .ConfigureAwait(false);
-                            break;
-                    }
+                    await InOrderAsync(() => HandleJoinedMessageCoreAsync(connection, message), cancellationToken)
+                        .ConfigureAwait(false);
                 }
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                // A cancelled request still leaves through the ordered lifecycle path below.
             }
             finally
             {
@@ -223,7 +180,12 @@ namespace SceneCollab.Server.WebApi.WebSockets
             }
         }
 
-        async Task<bool> HandleHelloAsync(ClientConnection connection, WireMessage message, CancellationToken cancellationToken)
+        Task<bool> HandleHelloAsync(ClientConnection connection, WireMessage message, CancellationToken cancellationToken)
+        {
+            return InOrderAsync(() => HandleHelloCoreAsync(connection, message, CancellationToken.None), cancellationToken);
+        }
+
+        async Task<bool> HandleHelloCoreAsync(ClientConnection connection, WireMessage message, CancellationToken cancellationToken)
         {
             if (!ProtocolVersion.IsCompatible(message.protocolVersion))
             {
@@ -279,6 +241,7 @@ namespace SceneCollab.Server.WebApi.WebSockets
                 scenePath = State.ScenePath,
                 sceneName = State.SceneName,
                 lockedNodeIds = State.SnapshotLocks(),
+                terrainLocks = State.TerrainLeases.Snapshot(),
                 assetCount = _assetCount,
                 assetGuids = _assetGuids,
                 participants = State.SnapshotParticipants(),
@@ -287,23 +250,15 @@ namespace SceneCollab.Server.WebApi.WebSockets
 
             await connection.SendAsync(WireJson.Serialize(welcome), cancellationToken).ConfigureAwait(false);
 
-            // The joiner already learned the roster from its welcome; sending it a presence
-            // snapshot too would just arrive out of order behind the welcome.
-            await BroadcastPresenceAsync(connection.ClientId, cancellationToken).ConfigureAwait(false);
+            // Welcome and the complete roster must arrive before the new recovery epoch.
+            await BroadcastPresenceCoreAsync(null, cancellationToken).ConfigureAwait(false);
+            await BeginSyncCoreAsync().ConfigureAwait(false);
             return true;
         }
 
-        async Task HandleOpAsync(ClientConnection connection, WireMessage message, CancellationToken cancellationToken)
+        Task HandleOpAsync(ClientConnection connection, WireMessage message, CancellationToken cancellationToken)
         {
-            await _operationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
-            try
-            {
-                await ApplyAndBroadcastOpAsync(connection, message).ConfigureAwait(false);
-            }
-            finally
-            {
-                _operationGate.Release();
-            }
+            return InOrderAsync(() => ApplyAndBroadcastOpAsync(connection, message), cancellationToken);
         }
 
         async Task ApplyAndBroadcastOpAsync(ClientConnection connection, WireMessage message)
@@ -313,7 +268,11 @@ namespace SceneCollab.Server.WebApi.WebSockets
             // Never trust the identity a client claims for itself.
             message.clientId = connection.ClientId;
 
-            var result = State.Apply(message);
+            var rejection = ValidateSnapshotSource(connection, message, message.snapshot || OpKinds.IsSnapshot(message.opKind));
+            var result = rejection == null ? State.Apply(message)
+                : ApplyResult.Reject(rejection, State.Revision, SyncRejectionMessage(rejection));
+            if (result.Accepted && !result.Duplicate && message.opKind == OpKinds.SnapshotEnd)
+                _snapshotEndSeen = true;
 
             var ack = new WireMessage
             {
@@ -325,6 +284,7 @@ namespace SceneCollab.Server.WebApi.WebSockets
                 code = result.Accepted ? null : result.Code,
                 message = result.Accepted ? null : result.Message,
                 clientId = connection.ClientId,
+                syncId = message.syncId,
                 room = Key,
                 serverTime = Now(),
             };
@@ -361,6 +321,7 @@ namespace SceneCollab.Server.WebApi.WebSockets
                 // Marks the op as part of a host snapshot so the receiver applies it without treating it
                 // as a concurrent edit (no conflict check, no undo entry).
                 snapshot = message.snapshot,
+                syncId = message.syncId,
                 revision = record.Revision,
                 room = Key,
                 serverTime = record.TimestampUnixMs,
@@ -400,71 +361,12 @@ namespace SceneCollab.Server.WebApi.WebSockets
                 .ConfigureAwait(false);
         }
 
-        /// <summary>
-        /// Relays one rectangle of terrain samples (v0.5). Terrain data is host-owned: heights and splat
-        /// weights live in a TerrainData asset that only the host can save, so a guest that sculpts
-        /// would fight a copy of that asset it can never persist. The server refuses those outright
-        /// rather than letting two writers oscillate forever.
-        /// </summary>
-        async Task HandleTerrainAsync(ClientConnection connection, WireMessage message, CancellationToken cancellationToken)
-        {
-            if (!string.Equals(State.HostClientId, connection.ClientId, StringComparison.Ordinal))
-            {
-                await SendErrorAsync(connection, ErrorCodes.NotHost, "only the host edits terrain", cancellationToken)
-                    .ConfigureAwait(false);
-                return;
-            }
-
-            var kindOk = string.Equals(message.terrainKind, "height", StringComparison.Ordinal)
-                || string.Equals(message.terrainKind, "splat", StringComparison.Ordinal);
-
-            if (!message.terrainValid
-                || !kindOk
-                || string.IsNullOrEmpty(message.terrainGuid)
-                || message.terrainX < 0
-                || message.terrainZ < 0
-                || message.terrainWidth <= 0
-                || message.terrainHeight <= 0
-                || message.terrainX + message.terrainWidth > message.terrainResolution
-                || message.terrainZ + message.terrainHeight > message.terrainResolution
-                || message.terrainPayload == null
-                || message.terrainPayload.Length > MaxTerrainPayloadChars)
-            {
-                await SendErrorAsync(connection, ErrorCodes.Malformed, "bad terrain patch", cancellationToken)
-                    .ConfigureAwait(false);
-                return;
-            }
-
-            var broadcast = new WireMessage
-            {
-                type = MessageTypes.Terrain,
-                clientId = connection.ClientId,
-                displayName = connection.DisplayName,
-                room = Key,
-                revision = State.Revision,
-                terrainValid = true,
-                terrainKind = message.terrainKind,
-                terrainGuid = message.terrainGuid,
-                terrainResolution = message.terrainResolution,
-                terrainLayers = message.terrainLayers,
-                terrainX = message.terrainX,
-                terrainZ = message.terrainZ,
-                terrainWidth = message.terrainWidth,
-                terrainHeight = message.terrainHeight,
-                terrainPayload = message.terrainPayload,
-                serverTime = Now(),
-            };
-
-            await BroadcastAsync(WireJson.Serialize(broadcast), connection.ClientId, cancellationToken)
-                .ConfigureAwait(false);
-        }
-
         async Task HandleAssetsAsync(ClientConnection connection, WireMessage message, CancellationToken cancellationToken)
         {
             if (!string.Equals(State.HostClientId, connection.ClientId, StringComparison.Ordinal))
             {
                 await SendErrorAsync(connection, ErrorCodes.NotHost, "only the host publishes the asset manifest",
-                        cancellationToken)
+                        cancellationToken, message)
                     .ConfigureAwait(false);
                 return;
             }
@@ -500,6 +402,13 @@ namespace SceneCollab.Server.WebApi.WebSockets
         {
             var nodeId = message.lockNodeId;
 
+            if (_syncActive && !release)
+            {
+                await SendErrorAsync(connection, ErrorCodes.SyncInProgress, "room recovery is in progress", cancellationToken, message)
+                    .ConfigureAwait(false);
+                return;
+            }
+
             if (release)
             {
                 State.Unlock(connection.ClientId, nodeId);
@@ -509,7 +418,7 @@ namespace SceneCollab.Server.WebApi.WebSockets
                 string owner;
                 if (!State.TryLock(connection.ClientId, nodeId, out owner))
                 {
-                    await SendErrorAsync(connection, ErrorCodes.Locked, "node is locked by " + owner, cancellationToken)
+                    await SendErrorAsync(connection, ErrorCodes.Locked, "node is locked by " + owner, cancellationToken, message)
                         .ConfigureAwait(false);
                     return;
                 }
@@ -532,7 +441,12 @@ namespace SceneCollab.Server.WebApi.WebSockets
             await BroadcastAsync(WireJson.Serialize(broadcast), null, cancellationToken).ConfigureAwait(false);
         }
 
-        public async Task BroadcastPresenceAsync(string exceptClientId, CancellationToken cancellationToken)
+        public Task BroadcastPresenceAsync(string exceptClientId, CancellationToken cancellationToken)
+        {
+            return InOrderAsync(() => BroadcastPresenceCoreAsync(exceptClientId, CancellationToken.None), cancellationToken);
+        }
+
+        async Task BroadcastPresenceCoreAsync(string exceptClientId, CancellationToken cancellationToken)
         {
             var presence = new WireMessage
             {
@@ -540,6 +454,7 @@ namespace SceneCollab.Server.WebApi.WebSockets
                 room = Key,
                 revision = State.Revision,
                 participants = State.SnapshotParticipants(),
+                lockedNodeIds = State.SnapshotLocks(),
                 serverTime = Now(),
             };
 
@@ -579,11 +494,12 @@ namespace SceneCollab.Server.WebApi.WebSockets
         {
             Task.Run(async () =>
             {
+                var nextPing = DateTime.UtcNow + HeartbeatInterval;
                 try
                 {
                     while (!token.IsCancellationRequested)
                     {
-                        await Task.Delay(HeartbeatInterval, token).ConfigureAwait(false);
+                        await Task.Delay(TimeSpan.FromSeconds(1), token).ConfigureAwait(false);
 
                         if (DateTime.UtcNow - connection.LastSeenUtc > SilenceTimeout)
                         {
@@ -591,9 +507,16 @@ namespace SceneCollab.Server.WebApi.WebSockets
                             return;
                         }
 
-                        await connection
-                            .SendAsync(WireJson.Serialize(new WireMessage { type = MessageTypes.Ping, serverTime = Now() }), token)
-                            .ConfigureAwait(false);
+                        // Expire idle leases even when no editor sends anything. This uses the
+                        // same operation gate as live writes, joins and recovery control frames.
+                        await InOrderAsync(() => Task.CompletedTask, token).ConfigureAwait(false);
+                        if (DateTime.UtcNow >= nextPing)
+                        {
+                            nextPing = DateTime.UtcNow + HeartbeatInterval;
+                            await connection
+                                .SendAsync(WireJson.Serialize(new WireMessage { type = MessageTypes.Ping, serverTime = Now() }), token)
+                                .ConfigureAwait(false);
+                        }
                     }
                 }
                 catch (OperationCanceledException)
@@ -607,7 +530,12 @@ namespace SceneCollab.Server.WebApi.WebSockets
             }, CancellationToken.None);
         }
 
-        async Task RemoveAsync(ClientConnection connection)
+        Task RemoveAsync(ClientConnection connection)
+        {
+            return InOrderAsync(() => RemoveCoreAsync(connection), CancellationToken.None);
+        }
+
+        async Task RemoveCoreAsync(ClientConnection connection)
         {
             bool removed;
             lock (_gate)
@@ -623,10 +551,12 @@ namespace SceneCollab.Server.WebApi.WebSockets
             State.Leave(connection.ClientId);
 
             // The request token is already cancelled here in most disconnects.
-            await BroadcastPresenceAsync(null, CancellationToken.None).ConfigureAwait(false);
+            await BroadcastPresenceCoreAsync(null, CancellationToken.None).ConfigureAwait(false);
+            await BeginSyncCoreAsync().ConfigureAwait(false);
         }
 
-        async Task SendErrorAsync(ClientConnection connection, string code, string message, CancellationToken cancellationToken)
+        async Task SendErrorAsync(ClientConnection connection, string code, string message, CancellationToken cancellationToken,
+            WireMessage request = null)
         {
             var error = new WireMessage
             {
@@ -634,6 +564,8 @@ namespace SceneCollab.Server.WebApi.WebSockets
                 code = code,
                 message = message,
                 clientId = connection.ClientId,
+                opId = request?.opId,
+                syncId = request?.syncId,
                 room = Key,
                 revision = State.Revision,
                 serverTime = Now(),
@@ -657,6 +589,9 @@ namespace SceneCollab.Server.WebApi.WebSockets
                     {
                         return null;
                     }
+
+                    if (result.MessageType != WebSocketMessageType.Text)
+                        throw new InvalidOperationException("only text messages are supported");
 
                     stream.Write(buffer, 0, result.Count);
 
@@ -694,9 +629,9 @@ namespace SceneCollab.Server.WebApi.WebSockets
             return builder.Length == 0 ? fallback : builder.ToString();
         }
 
-        static long Now()
+        long Now()
         {
-            return DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            return _utcNow();
         }
     }
 }

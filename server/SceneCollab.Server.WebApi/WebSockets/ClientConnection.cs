@@ -16,6 +16,7 @@ namespace SceneCollab.Server.WebApi.WebSockets
     {
         readonly WebSocket _socket;
         readonly SemaphoreSlim _sendGate = new SemaphoreSlim(1, 1);
+        static readonly TimeSpan SendTimeout = TimeSpan.FromSeconds(5);
 
         public ClientConnection(WebSocket socket, string clientId, string roomKey)
         {
@@ -54,26 +55,32 @@ namespace SceneCollab.Server.WebApi.WebSockets
             }
 
             var payload = Encoding.UTF8.GetBytes(json);
-            await _sendGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeout.CancelAfter(SendTimeout);
+            var entered = false;
             try
             {
+                await _sendGate.WaitAsync(timeout.Token).ConfigureAwait(false);
+                entered = true;
                 if (!IsOpen)
                 {
                     return;
                 }
 
                 await _socket
-                    .SendAsync(new ArraySegment<byte>(payload), WebSocketMessageType.Text, true, cancellationToken)
+                    .SendAsync(new ArraySegment<byte>(payload), WebSocketMessageType.Text, true, timeout.Token)
+                    .WaitAsync(timeout.Token)
                     .ConfigureAwait(false);
             }
             catch (Exception)
             {
-                // A dead socket is not an error worth propagating: the receive loop will
-                // notice and remove the client.
+                // A broken/blocked peer cannot hold the room's ordered delivery gate forever.
+                // Abort also wakes its receive loop so membership and leases get cleaned up.
+                try { _socket.Abort(); } catch (Exception) { }
             }
             finally
             {
-                _sendGate.Release();
+                if (entered) _sendGate.Release();
             }
         }
 
@@ -81,16 +88,19 @@ namespace SceneCollab.Server.WebApi.WebSockets
         {
             try
             {
+                using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                timeout.CancelAfter(SendTimeout);
                 if (_socket.State == WebSocketState.Open || _socket.State == WebSocketState.CloseReceived)
                 {
                     await _socket
-                        .CloseAsync(status, description ?? string.Empty, cancellationToken)
+                        .CloseAsync(status, description ?? string.Empty, timeout.Token)
+                        .WaitAsync(timeout.Token)
                         .ConfigureAwait(false);
                 }
             }
             catch (Exception)
             {
-                // ignored on purpose
+                try { _socket.Abort(); } catch (Exception) { }
             }
         }
     }

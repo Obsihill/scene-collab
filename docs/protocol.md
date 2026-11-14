@@ -1,4 +1,6 @@
-# Wire protocol (v1)
+# Wire protocol (v2, v0.6.0)
+
+Released in **v0.6.0 on 2026-11-14 (KST)**.
 
 One message shape, both directions. Everything below is a field of
 `SceneCollab.Contracts.Protocol.WireMessage` — a flat class of public fields, because Unity's
@@ -33,7 +35,8 @@ GET /rooms                   header: X-SceneCollab-Token  → JSON, scenes curre
 client → hello   { type, protocolVersion, displayName, room, sceneGuid, sceneName, scenePath }
 server → welcome { type, clientId, displayName, color, room, revision,
                     isHost, isScribe, sceneGuid, sceneName, scenePath, participants[] }
-server → presence (broadcast to the others; the joiner already has the roster in welcome)
+server → presence (broadcast to every participant)
+server → sync_begin { syncId, clientId: host, revision }
 ```
 
 The first participant of a room **is** the host: the server records it at join time and sends it
@@ -45,7 +48,7 @@ be able to edit a document it does not have. If the room is empty, the joiner's 
 room's scene and is echoed in `welcome`.
 
 When the host disconnects, the server promotes the participant that has been connected longest and
-sends `welcome` to everyone with the new flags, so the host identity is never in doubt on any peer.
+sends `presence` with the new flags, followed by a new recovery epoch.
 
 The server rejects an incompatible `protocolVersion` **before** any room state exists, then
 closes the socket with `policy_violation`. Failing early is the point: a client that speaks a
@@ -78,7 +81,8 @@ the removed node's payload in `oldValue`, so a late joiner can be told what was 
 Structural ops require the sender to hold the `nodeId` lock (`locked`); any participant may
 restructure, but only the host may `SaveScene`. A **host snapshot** is exempt from locks — a guest
 holding a lock must not leave a late joiner with a half-built scene — and the exemption is host-only,
-so a guest cannot set `snapshot` to skip a lock (`locked`).
+so a guest cannot set `snapshot` to skip a lock (`not_host`). Protocol 2 also requires the active
+recovery `syncId` and refuses live edits until that recovery completes.
 
 ### op kinds
 
@@ -94,7 +98,7 @@ so a guest cannot set `snapshot` to skip a lock (`locked`).
 | `snapshot_start` | first op of a host snapshot (`newValue` = node count) | no |
 | `snapshot_chunk` | one chunk; `newValue` is a `SnapshotChunk` JSON (`ops[]`, `index`, `total`) | no |
 | `snapshot_end` | last op of a host snapshot (`newValue` = node count) | no |
-| `snapshot_request` | guest asks the host to resend (`newValue` = nodes it has) | no |
+| `snapshot_request` | legacy kind; protocol 2 clients use `sync_request` instead | no |
 
 ### snapshots
 
@@ -102,21 +106,20 @@ A participant who joins after edits began has an empty scene: the server keeps t
 scene. The host therefore streams its scene on demand.
 
 ```
-host  → op { opKind: "snapshot_start",   newValue: "<nodes>", snapshot: true }
-host  → op { opKind: "snapshot_chunk",   newValue: "<SnapshotChunk JSON>", snapshot: true }
+host  → op { opKind: "snapshot_start",   newValue: "<nodes>", snapshot: true, syncId }
+host  → op { opKind: "snapshot_chunk",   newValue: "<SnapshotChunk JSON>", snapshot: true, syncId }
 host  → op { opKind: "snapshot_chunk",   ... }                       // as many as needed
-host  → op { opKind: "snapshot_end",     newValue: "<nodes>", snapshot: true }
-guest → op { opKind: "snapshot_request", newValue: "<nodes it has>" } // optional nudge
+host  → op { opKind: "snapshot_end",     newValue: "<nodes>", snapshot: true, syncId }
+client → sync_request // restart the room-wide recovery, including terrain
 ```
 
 - Chunks are sent **one at a time**: the next chunk waits for the ack of the previous one.
 - Parents always precede their children, so the receiver can build the hierarchy op by op.
 - The receiver removes nodes it holds that the snapshot did not mention, then records the snapshot's
   node ids. The result is the host's scene, not a union of both.
-- Local diffing is suppressed until `snapshot_end`, so applying a snapshot does not echo back as new
-  ops.
-- A snapshot in flight does not block the room: other participants' ops still apply on the host, and
-  they simply arrive after the snapshot.
+- Local diffing stays paused until the final server `sync_ready`, after scene and terrain checks.
+- Live edits are blocked for the entire room during recovery. Missing/duplicate chunks and fields
+  that still cannot resolve at snapshot end fail completion instead of reopening editing.
 
 ### value encoding
 
@@ -207,7 +210,7 @@ sender's scene.
 | `room_full` | reserved |
 | `scene_mismatch` | the room's scene GUID differs from the joiner's |
 | `locked` | structural op on a node another participant holds |
-| `not_host` | structural op from someone who is not the host |
+| `not_host` | snapshot or asset-manifest publication from someone who is not the host |
 
 ## Locks
 
@@ -258,9 +261,10 @@ drawn as an editor overlay (`HideFlags.DontSave`) — they are not scene objects
 ## Terrain
 
 ```
-host → terrain { type, sceneGuid, terrainGuid, terrainKind, terrainResolution, terrainLayers,
-                 terrainX, terrainZ, terrainWidth, terrainHeight, terrainPayload }
+client → terrain { type, opId, sceneGuid, terrainGuid, terrainKind, terrainResolution, terrainLayers,
+                   terrainX, terrainZ, terrainWidth, terrainHeight, terrainPayload, terrainLeaseId }
 server → terrain (to every other participant in the room)
+server → terrain_ack { opId, accepted, code, message }
 ```
 
 Heights and splat weights live in a `TerrainData` **asset**, not in the scene: the scene component only
@@ -276,13 +280,50 @@ no op at all — the diff is right to report "nothing changed". Patches travel o
   raw, ~44 KB encoded) or 64×64 splat samples; a wider stroke arrives as several tiles, and the tile
   shrinks automatically when a terrain has many layers. Splat payloads iterate X, then Z, then layer;
   Unity's alphamap arrays are indexed `[z, x, layer]`. Editors must use the corrected codec on all peers.
-- The host is the only writer; the server answers `not_host` to anyone else. Guests apply, mark the
-  TerrainData dirty, and never save it — the host owns the asset exactly as it owns the scene.
+- Every participant may write a region covered by their server-issued lease. The host also applies
+  guest patches. Only the host saves TerrainData, as with the scene itself.
 - The message carries no `revision` and never enters the op log. On join or reconnect the host sends
   a full tiled terrain transfer, including after the scene snapshot, followed by live changes. It is
-  also broadcast to existing peers. Delivery is not acknowledged or replayed; reconnecting triggers a
-  fresh transfer.
+  also broadcast to existing peers. Tile acknowledgements bound outstanding work; reconnecting
+  triggers a new complete transfer rather than replaying uncertain local terrain changes.
 - Trees, details and terrain holes are not on this channel yet.
+
+### Automatic terrain leases (protocol 2)
+
+Each TerrainData GUID uses a normalized **16 × 16** grid shared by height and paint data. A 2 × 2 km
+terrain therefore has approximately 125 × 125 m sectors. The client requests the rectangle covered by
+the brush through `terrain_lock` with `regionX`, `regionZ`, `regionWidth`, `regionHeight` and `opId`.
+The server grants the entire rectangle or rejects it; rectangles owned by different participants
+cannot overlap. `terrain_locks` broadcasts the complete `TerrainRegionLease[]` occupancy view.
+Each lease carries its owner, display name, terrain GUID, rectangle, expiry and opaque `leaseId`.
+
+Live patches require `terrainLeaseId`; the server validates owner, expiry, terrain and coverage.
+Leases expire after 15 seconds, are renewed by accepted edits, and are released on disconnect or
+recovery. Clients release idle regions after 2 seconds. The first unleased stroke is buffered while
+the original terrain is restored; it is applied only after a grant. A conflicting incoming change
+invalidates that buffered stroke. Scene view draws occupied regions with participant labels.
+
+### Room recovery barrier (protocol 2)
+
+Joining, leaving/host promotion and `sync_request` create a new `syncId`. The server broadcasts
+`sync_begin`, stops live edit/lease acceptance, and clears terrain leases. All editors pause normal
+editing and saving. The host sends acknowledged scene snapshot frames tagged with this `syncId`,
+then terrain tiles with `snapshot=true` and the same ID. Snapshot content is accepted only from the
+current host. A guest's `snapshot` flag never bypasses a lease or host check.
+
+After the scene end ACK and terrain transfer, the host sends `sync_end { syncId, syncTerrainTiles }`.
+The server checks the scene-end phase and accepted tile count and broadcasts `sync_end`. Each editor
+checks complete ordered scene chunks and applied terrain counts, then sends
+`sync_ready { syncId, accepted }`. Only a successful vote from every current participant permits the
+server's final `sync_ready { accepted:true }`. An old epoch cannot resume editing. A failed vote
+leaves the room paused until a fresh recovery or membership change.
+An editor promoted during an incomplete inbound recovery must not publish its partial copy as the
+new baseline; it fails closed until the room can be restarted from a complete copy.
+
+New rejection codes include `sync_in_progress`, `sync_mismatch`, `sync_incomplete`, `sync_failed`
+and `terrain_lease_invalid`. Missing assets, mismatched resolutions/layers, rejected tiles and ACK
+timeouts remain visible in the recovery UI. Only normal Unity UI edits and saves are guarded;
+arbitrary scripts or custom tools that bypass those hooks are outside that guarantee.
 
 ## Room listing
 
@@ -299,6 +340,9 @@ over the socket by the host, to participants only.
 
 ## Versioning
 
-`ProtocolVersion.Current` / `ProtocolVersion.MinCompatible`. Additive fields do not bump the
+`ProtocolVersion.Current` / `ProtocolVersion.MinCompatible` are both **2** in v0.6.0, which includes
+room recovery and automatic terrain-region leases. Deploy server and all editors together;
+v0.5.6 uses protocol 1 and is incompatible with this release.
+Additive fields do not bump the
 version (both sides ignore unknown fields). Removing or renaming a field does, because those
 names are the protocol.

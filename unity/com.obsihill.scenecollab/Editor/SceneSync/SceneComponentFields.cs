@@ -46,6 +46,7 @@ namespace SceneCollab.Editor.SceneSync
         {
             "m_Script",
             "m_GameObject",
+            "m_ObjectHideFlags", // Local editor guards must never become shared scene state.
             "m_CorrespondingSourceObject",
             "m_PrefabInstance",
             "m_PrefabAsset",

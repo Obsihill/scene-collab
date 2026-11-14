@@ -7,8 +7,8 @@ namespace SceneCollab.Contracts.Protocol
     /// </summary>
     public static class ProtocolVersion
     {
-        public const int Current = 1;
-        public const int MinCompatible = 1;
+        public const int Current = 2;
+        public const int MinCompatible = 2;
 
         public static bool IsCompatible(int clientVersion)
         {

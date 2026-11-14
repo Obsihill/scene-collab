@@ -22,6 +22,8 @@ namespace SceneCollab.Domain.Room
     {
         public const int DefaultHistoryLimit = 4096;
 
+        public TerrainLeaseRegistry TerrainLeases { get; } = new TerrainLeaseRegistry();
+
         static readonly string[] Palette =
         {
             "#4C9AFF", "#F368E0", "#20C997", "#FF9F43", "#EE5253",
@@ -255,6 +257,7 @@ namespace SceneCollab.Domain.Room
                 }
 
                 _joinOrder.Remove(clientId);
+                TerrainLeases.ReleaseClient(clientId);
 
                 if (_scribeClientId == clientId)
                 {
@@ -322,6 +325,12 @@ namespace SceneCollab.Domain.Room
                 if (string.IsNullOrEmpty(op.clientId) || !_participants.ContainsKey(op.clientId))
                 {
                     return ApplyResult.Reject(ErrorCodes.NotInitialized, _revision, "unknown clientId");
+                }
+
+                if ((op.snapshot || OpKinds.IsSnapshot(op.opKind))
+                    && !string.Equals(op.clientId, _hostClientId, StringComparison.Ordinal))
+                {
+                    return ApplyResult.Reject(ErrorCodes.NotHost, _revision, "only the host supplies snapshots");
                 }
 
                 OpRecord previous;

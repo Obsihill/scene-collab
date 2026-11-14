@@ -24,6 +24,7 @@ namespace SceneCollab.Editor.Tests
 
         GameObject _host;
         TerrainData _data;
+        readonly List<TerrainSync> _controlled = new List<TerrainSync>();
 
         [SetUp]
         public void SetUp()
@@ -46,6 +47,8 @@ namespace SceneCollab.Editor.Tests
         [TearDown]
         public void TearDown()
         {
+            foreach (var sync in _controlled) sync.Unbind();
+            _controlled.Clear();
             if (_host != null)
             {
                 UnityEngine.Object.DestroyImmediate(_host);
@@ -276,10 +279,435 @@ namespace SceneCollab.Editor.Tests
             }
         }
 
-        /// <summary>
-        /// <see cref="TerrainSync.Tick"/> polls at 0.6 s intervals, so a second edit inside one interval
-        /// would be invisible — which is the point: sculpt strokes are far coarser than that.
-        /// </summary>
+        [Test]
+        public void GuestStrokeIsRestoredUntilItsCorrelatedGrantThenCommittedOnlyOnAck()
+        {
+            var sync = StartControl(out var session);
+            _data.SetHeights(20, 30, Blob(8, 8, 0.5f));
+            Assert.AreEqual(0f, Sample(20, 30), 1e-6f, "unleased callbacks must restore immediately");
+            Assert.AreEqual(0, session.SentTerrain.Count);
+            var request = LockRequest(session);
+            Assert.IsTrue(string.IsNullOrEmpty(request.terrainLeaseId), "new leases are server-assigned");
+            TerrainRegionRules.TryMapPatch(Resolution, 20, 30, 8, 8, out var x, out var z, out var w, out var h);
+            Assert.AreEqual(new RectInt(x, z, w, h), new RectInt(request.regionX, request.regionZ, request.regionWidth, request.regionHeight));
+            session.DeliverControl(new WireMessage { type = MessageTypes.TerrainLocks, accepted = true,
+                opId = "unrelated", terrainLocks = Array.Empty<TerrainRegionLease>() });
+            Assert.AreEqual(0, session.SentTerrain.Count, "a different request cannot apply the buffered stroke");
+            var lease = Grant(session, request);
+            Assert.AreEqual(0.5f, Sample(20, 30), 2f / 65535f);
+            Assert.AreEqual(1, session.SentTerrain.Count);
+            var patch = session.SentTerrain[0];
+            Assert.AreEqual(lease.leaseId, patch.terrainLeaseId);
+            Assert.IsFalse(string.IsNullOrEmpty(patch.opId));
+            Ack(session, patch, true);
+            sync.EditingAllowed = false;
+            Assert.AreEqual(0.5f, Sample(20, 30), 2f / 65535f, "accepted terrain survives pause");
+        }
+
+        [Test]
+        public void AdditionalStrokesWhileLockPendingAreDiscardedAndDenialRestoresAll()
+        {
+            var sync = StartControl(out var session);
+            _data.SetHeights(20, 30, Blob(1, 1, 0.5f));
+            _data.SetHeights(100, 100, Blob(1, 1, 0.8f));
+            Assert.AreEqual(0f, Sample(20, 30), 1e-6f);
+            Assert.AreEqual(0f, Sample(100, 100), 1e-6f);
+            Assert.AreEqual(1, session.SentControl.Count);
+            session.DeliverControl(new WireMessage { type = MessageTypes.TerrainLocks, accepted = false,
+                opId = LockRequest(session).opId, code = ErrorCodes.Locked, terrainLocks = Array.Empty<TerrainRegionLease>() });
+            Assert.AreEqual(0, session.SentTerrain.Count);
+            StringAssert.Contains("denied", sync.LastNote);
+            Assert.IsTrue(sync.EditingAllowed, "an ordinary lock denial needs a retry, not whole-scene recovery");
+        }
+
+        [Test]
+        public void IntersectingRemotePatchInvalidatesBufferedStrokeEvenIfLockLaterSucceeds()
+        {
+            var sync = StartControl(out var session);
+            _data.SetHeights(20, 30, Blob(2, 2, 0.5f));
+            session.Deliver(Remote(20, 30, 0.8f));
+            Grant(session, LockRequest(session));
+            Assert.AreEqual(0.8f, Sample(20, 30), 2f / 65535f);
+            Assert.AreEqual(0f, Sample(21, 31), 1e-6f);
+            Assert.AreEqual(0, session.SentTerrain.Count);
+            Assert.IsNotNull(session.SentControl.Find(m => m.type == MessageTypes.TerrainUnlock));
+            StringAssert.Contains("retry", sync.LastNote);
+        }
+
+        [Test]
+        public void DisjointRemotePatchPreservesPendingStrokeAndDoesNotEcho()
+        {
+            StartControl(out var session);
+            _data.SetHeights(20, 30, Blob(1, 1, 0.5f));
+            session.Deliver(Remote(110, 110, 0.8f));
+            Grant(session, LockRequest(session));
+            Assert.AreEqual(1, session.SentTerrain.Count);
+            Ack(session, session.SentTerrain[0], true);
+            Assert.AreEqual(0.8f, Sample(110, 110), 2f / 65535f);
+            Assert.AreEqual(0.5f, Sample(20, 30), 2f / 65535f);
+        }
+
+        [Test]
+        public void PausedNativeEditsAreImmediatelyRestoredWithoutRequestingLocks()
+        {
+            var sync = StartControl(out var session, allow: false);
+            Assert.IsFalse(sync.EditingAllowed);
+            _data.SetHeights(20, 30, Blob(1, 1, 0.5f));
+            Assert.AreEqual(0f, Sample(20, 30), 1e-6f);
+            Assert.AreEqual(0, session.SentControl.Count);
+            Assert.AreEqual(0, session.SentTerrain.Count);
+        }
+
+        [Test]
+        public void PauseDiscardsPendingGrantAndReleasesALateLease()
+        {
+            var sync = StartControl(out var session);
+            _data.SetHeights(20, 30, Blob(1, 1, 0.5f));
+            var request = LockRequest(session);
+            sync.EditingAllowed = false;
+            var lease = Grant(session, request);
+            Assert.AreEqual(0f, Sample(20, 30), 1e-6f);
+            Assert.AreEqual(0, session.SentTerrain.Count);
+            Assert.IsNotNull(session.SentControl.Find(m => m.type == MessageTypes.TerrainUnlock && m.terrainLeaseId == lease.leaseId));
+        }
+
+        [Test]
+        public void RejectionRestoresLastAcknowledgedBaselineAndRaisesFailure()
+        {
+            var sync = StartControl(out var session);
+            string failure = null;
+            sync.Failed += reason => failure = reason;
+            _data.SetHeights(20, 30, Blob(1, 1, 0.25f));
+            Grant(session, LockRequest(session));
+            Ack(session, session.SentTerrain[0], true);
+            _data.SetHeights(20, 30, Blob(1, 1, 0.75f));
+            Assert.AreEqual(2, session.SentTerrain.Count, "an existing own lease permits the next stroke");
+            Ack(session, session.SentTerrain[1], false);
+            Assert.AreEqual(0.25f, Sample(20, 30), 2f / 65535f);
+            StringAssert.Contains("rejected", failure);
+            Assert.IsFalse(sync.EditingAllowed);
+        }
+
+        [Test]
+        public void PauseRollsBackUnacknowledgedPatchButPreservesItsAcceptedVerdict()
+        {
+            var sync = StartControl(out var session);
+            var failures = 0;
+            sync.Failed += reason => failures++;
+            _data.SetHeights(20, 30, Blob(1, 1, 0.5f));
+            Grant(session, LockRequest(session));
+            var patch = session.SentTerrain[0];
+            sync.EditingAllowed = false;
+            Assert.AreEqual(0f, Sample(20, 30), 1e-6f);
+            Ack(session, patch, true);
+            Assert.AreEqual(0, failures, "an ordered ACK during the retry pause is not a protocol failure");
+            Assert.AreEqual(0.5f, Sample(20, 30), 2f / 65535f, "accepted samples become authoritative even while paused");
+            Assert.AreEqual(1, session.SentTerrain.Count, "committing the verdict must not echo or resend the edit");
+            sync.EditingAllowed = true;
+            Assert.IsFalse(sync.EditingAllowed, "the parent must finish recovery before resuming");
+        }
+
+        [TestCase(true)]
+        [TestCase(false)]
+        public void HostRetrySnapshotHonorsTheVerdictOfATileCanceledBeforeTheRecoveryBarrier(bool accepted)
+        {
+            var sync = StartControl(out var session, host: true);
+            var failures = 0;
+            sync.Failed += reason => failures++;
+            // Four captured tiles, of which only the first has actually been sent.
+            _data.SetHeights(0, 0, Blob(Resolution, Resolution, 0.5f));
+            Grant(session, LockRequest(session));
+            Assert.AreEqual(1, session.SentTerrain.Count);
+            var live = session.SentTerrain[0];
+
+            sync.EditingAllowed = false; // Parent RetryRecovery pauses before the server ACK.
+            Assert.AreEqual(0f, Sample(20, 30), 1e-6f);
+            Ack(session, live, accepted);
+            var expected = accepted ? 0.5f : 0f;
+            Assert.AreEqual(expected, Sample(20, 30), 2f / 65535f);
+            Assert.AreEqual(0f, Sample(Resolution - 1, Resolution - 1), 1e-6f, "unsent tiles remain discarded");
+            Assert.AreEqual(0, failures);
+            Assert.IsFalse(sync.EditingAllowed);
+
+            sync.BeginRecovery("retry-after-verdict");
+            sync.RequestFullSync("retry-after-verdict");
+            sync.Tick();
+            var snapshot = session.SentTerrain.Find(p => p.snapshot && p.terrainX == 0 && p.terrainZ == 0);
+            Assert.IsNotNull(snapshot);
+            Assert.IsTrue(TerrainPatchCodec.TryDecodeHeights(snapshot.terrainPayload,
+                snapshot.terrainWidth, snapshot.terrainHeight, out var samples));
+            Assert.AreEqual(expected, samples[30, 20], 2f / 65535f,
+                "the next host snapshot must retain the accepted tile, not the pre-ACK rollback baseline");
+            Assert.AreEqual(4, sync.FullSyncSent);
+            Assert.AreEqual(5, session.SentTerrain.Count, "there is no resumed live-stroke outbox");
+        }
+
+        [Test]
+        public void CanceledLiveVerdictBlocksSnapshotPublicationUntilRejectionArrives()
+        {
+            var sync = StartControl(out var session, host: true);
+            _data.SetHeights(20, 30, Blob(1, 1, 0.5f));
+            Grant(session, LockRequest(session));
+            var live = session.SentTerrain[0];
+            sync.EditingAllowed = false;
+            sync.BeginRecovery("barrier-before-rejection");
+            sync.RequestFullSync("barrier-before-rejection");
+            sync.Tick();
+            Assert.IsTrue(sync.FullSyncInProgress, "the queued recovery must wait for the unknown verdict");
+            Assert.AreEqual(0, sync.FullSyncSent);
+            Assert.AreEqual(1, session.SentTerrain.Count);
+
+            // Another peer's SyncRequest may precede our patch, so a rejection after SyncBegin is valid.
+            Ack(session, live, false);
+            sync.Tick();
+            Assert.AreEqual(4, sync.FullSyncSent);
+            Assert.AreEqual(0, sync.SkippedDuringRecovery);
+            Assert.AreEqual(0f, Sample(20, 30), 1e-6f);
+        }
+
+        [TestCase("active")]
+        [TestCase("canceled")]
+        [TestCase("ended")]
+        public void AcceptedCanceledPatchCannotOverwriteALaterRecoveryGeneration(string phase)
+        {
+            var sync = StartControl(out var session, host: true);
+            var failures = 0;
+            sync.Failed += reason => failures++;
+            _data.SetHeights(20, 30, Blob(1, 1, 0.5f));
+            Grant(session, LockRequest(session));
+            var live = session.SentTerrain[0];
+            sync.EditingAllowed = false;
+            sync.BeginRecovery("new-generation");
+            sync.RequestFullSync("new-generation");
+            sync.Tick();
+            var authoritative = Remote(20, 30, 0.8f);
+            authoritative.snapshot = true;
+            authoritative.syncId = "new-generation";
+            session.Deliver(authoritative);
+            if (phase == "canceled") sync.CancelRecovery();
+            if (phase == "ended") sync.EndRecovery();
+
+            Ack(session, live, true);
+            Assert.AreEqual(1, failures, "acceptance after a newer barrier violates the ordered protocol");
+            Assert.AreEqual(0.8f, Sample(20, 30), 2f / 65535f, "a stale accepted tile must not overwrite newer samples");
+            Assert.AreEqual(1, sync.SkippedDuringRecovery);
+            Assert.IsFalse(sync.FullSyncInProgress);
+            Assert.IsFalse(sync.EditingAllowed);
+            sync.Tick();
+            Assert.AreEqual(1, session.SentTerrain.Count, "failure cancels the queued snapshot before any tile is published");
+        }
+
+        [Test]
+        public void UnknownCanceledVerdictTimesOutWithoutPublishingAnOlderSnapshot()
+        {
+            double now = 0;
+            var sync = StartControl(out var session, host: true, clock: () => now);
+            var failures = 0;
+            sync.Failed += reason => failures++;
+            _data.SetHeights(20, 30, Blob(1, 1, 0.5f));
+            Grant(session, LockRequest(session));
+            sync.EditingAllowed = false;
+            sync.BeginRecovery("missing-verdict");
+            sync.RequestFullSync("missing-verdict");
+            now = TerrainSync.AckTimeoutSeconds + 0.1;
+            sync.Tick();
+            Assert.AreEqual(1, failures);
+            Assert.AreEqual(0, sync.FullSyncSent);
+            Assert.IsFalse(sync.FullSyncInProgress);
+            Assert.IsFalse(sync.EditingAllowed);
+            Assert.AreEqual(1, session.SentTerrain.Count);
+        }
+
+        [Test]
+        public void ExpiredLeaseDoesNotDiscardOutstandingAckAndIdleReleaseWaitsForIt()
+        {
+            double now = 0;
+            long utc = 100000;
+            var sync = StartControl(out var session, clock: () => now, utc: () => utc);
+            _data.SetHeights(20, 30, Blob(1, 1, 0.5f));
+            var lease = Grant(session, LockRequest(session), utc + 1000);
+            now = 3; utc += 2000;
+            session.DeliverControl(new WireMessage { type = MessageTypes.TerrainLocks, terrainLocks = Array.Empty<TerrainRegionLease>() });
+            sync.Tick();
+            Assert.IsNull(session.SentControl.Find(m => m.type == MessageTypes.TerrainUnlock));
+            Ack(session, session.SentTerrain[0], true);
+            Assert.AreEqual(0.5f, Sample(20, 30), 2f / 65535f);
+            now += TerrainSync.IdleLeaseSeconds + 0.1;
+            sync.Tick();
+            Assert.IsNotNull(session.SentControl.Find(m => m.type == MessageTypes.TerrainUnlock && m.terrainLeaseId == lease.leaseId));
+        }
+
+        [Test]
+        public void HostIngestsGuestPatchWithoutCallbackEcho()
+        {
+            var sync = StartControl(out var session, host: true);
+            var patch = Remote(10, 12, 0.5f);
+            patch.clientId = "guest";
+            session.Deliver(patch);
+            sync.Tick();
+            Assert.AreEqual(1, sync.Applied);
+            Assert.AreEqual(0.5f, Sample(10, 12), 2f / 65535f);
+            Assert.AreEqual(0, session.SentTerrain.Count);
+            Assert.AreEqual(0, session.SentControl.Count);
+        }
+
+        [Test]
+        public void OtherOwnersRegionIsRevertedWithoutAcquiringOrSending()
+        {
+            StartControl(out var session);
+            session.DeliverControl(new WireMessage { type = MessageTypes.TerrainLocks, terrainLocks = new[] {
+                new TerrainRegionLease { terrainGuid = GuidOf(_data), clientId = "other", displayName = "Other",
+                    leaseId = "occupied", x = 0, z = 0, width = 16, height = 16,
+                    expiresAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + 15000 } } });
+            _data.SetHeights(20, 30, Blob(1, 1, 0.5f));
+            Assert.AreEqual(0f, Sample(20, 30), 1e-6f);
+            Assert.AreEqual(0, session.SentTerrain.Count);
+            Assert.AreEqual(0, session.SentControl.Count);
+        }
+
+        [Test]
+        public void FullSyncIsQueuedBeforeTickBoundedToEightAndWaitsForAllAcks()
+        {
+            _data.heightmapResolution = 513;
+            var sync = StartControl(out var session, host: true);
+            sync.BeginRecovery("recovery");
+            sync.RequestFullSync("recovery");
+            Assert.IsTrue(sync.FullSyncInProgress, "the parent checks this before terrain's first Tick");
+            Assert.AreEqual(25, sync.FullSyncTotal);
+            var acknowledged = 0;
+            for (var tick = 0; tick < 10 && sync.FullSyncInProgress; tick++)
+            {
+                var before = session.SentTerrain.Count;
+                sync.Tick();
+                Assert.LessOrEqual(session.SentTerrain.Count - before, 8);
+                if (session.SentTerrain.Count > acknowledged) Assert.IsTrue(sync.FullSyncInProgress);
+                while (acknowledged < session.SentTerrain.Count)
+                {
+                    var patch = session.SentTerrain[acknowledged++];
+                    Assert.IsTrue(patch.snapshot);
+                    Assert.IsTrue(patch.terrainValid);
+                    Assert.AreEqual("recovery", patch.syncId);
+                    Assert.IsTrue(string.IsNullOrEmpty(patch.terrainLeaseId));
+                    Ack(session, patch, true);
+                }
+            }
+            Assert.IsFalse(sync.FullSyncInProgress);
+            Assert.AreEqual(25, sync.FullSyncSent);
+            Assert.AreEqual(sync.FullSyncTotal, sync.FullSyncSent);
+            Assert.IsFalse(sync.EditingAllowed);
+            sync.EndRecovery();
+            Assert.IsFalse(sync.EditingAllowed, "SyncReady is owned by the parent");
+            sync.EditingAllowed = true;
+            Assert.IsTrue(sync.EditingAllowed);
+        }
+
+        [Test]
+        public void RecoveryCountsOnlyAppliedCurrentGenerationTilesAndReportsInvalidOnes()
+        {
+            var sync = StartControl(out var session);
+            sync.BeginRecovery("current");
+            var patch = Remote(10, 12, 0.5f);
+            patch.snapshot = true;
+            patch.syncId = "old";
+            session.Deliver(patch);
+            Assert.AreEqual(0, sync.RecoveryApplied);
+            patch.syncId = "current";
+            session.Deliver(patch);
+            session.Deliver(patch);
+            Assert.AreEqual(1, sync.RecoveryApplied, "duplicate tiles do not hide missing ones");
+            sync.BeginRecovery("current");
+            Assert.AreEqual(1, sync.RecoveryApplied, "duplicate begin must not reset counters");
+            _data.SetHeights(10, 12, Blob(1, 1, 0.9f));
+            Assert.AreEqual(0.5f, Sample(10, 12), 2f / 65535f, "snapshot became the paused rollback baseline");
+            patch.terrainPayload = "invalid";
+            session.Deliver(patch);
+            Assert.AreEqual(1, sync.SkippedDuringRecovery);
+            Assert.AreEqual(1, sync.RecoveryApplied);
+            Assert.AreEqual(0, session.SentTerrain.Count);
+        }
+
+        [TestCase(false)]
+        [TestCase(true)]
+        public void FailedOrCanceledRecoveryStopsAllQueuedAndOutstandingTerrain(bool cancel)
+        {
+            _data.heightmapResolution = 513;
+            var sync = StartControl(out var session, host: true);
+            sync.RequestFullSync("failed");
+            sync.Tick();
+            Assert.AreEqual(8, session.SentTerrain.Count);
+            if (cancel) sync.CancelRecovery();
+            else session.DeliverControl(new WireMessage { type = MessageTypes.SyncReady, syncId = "failed", accepted = false });
+            Assert.IsFalse(sync.FullSyncInProgress);
+            foreach (var patch in session.SentTerrain.ToArray()) Ack(session, patch, true);
+            sync.Tick();
+            Assert.AreEqual(8, session.SentTerrain.Count);
+            Assert.IsFalse(sync.EditingAllowed);
+        }
+
+        [Test]
+        public void SnapshotRejectionRaisesFailureAndDoesNotRetrySending()
+        {
+            var sync = StartControl(out var session, host: true);
+            var failures = 0;
+            sync.Failed += reason => failures++;
+            sync.RequestFullSync("rejected");
+            sync.Tick();
+            Ack(session, session.SentTerrain[0], false);
+            var sent = session.SentTerrain.Count;
+            sync.Tick();
+            Assert.AreEqual(sent, session.SentTerrain.Count);
+            Assert.AreEqual(1, failures);
+            Assert.AreEqual(1, sync.SkippedDuringRecovery);
+            Assert.IsFalse(sync.FullSyncInProgress);
+        }
+
+        TerrainSync StartControl(out ControlSession session, bool host = false, bool allow = true,
+            Func<double> clock = null, Func<long> utc = null)
+        {
+            session = new ControlSession { IsHost = host };
+            var sync = new TerrainSync(clock, utc);
+            _controlled.Add(sync);
+            sync.Bind(session);
+            Assert.IsFalse(sync.EditingAllowed, "control sessions must start paused");
+            sync.EditingAllowed = allow;
+            return sync;
+        }
+
+        float Sample(int x, int z) => _data.GetHeights(x, z, 1, 1)[0, 0];
+
+        WireMessage Remote(int x, int z, float value)
+        {
+            return new WireMessage { type = MessageTypes.Terrain, terrainValid = true, opId = Guid.NewGuid().ToString("N"),
+                terrainGuid = GuidOf(_data), terrainKind = TerrainPatchCodec.KindHeight, terrainResolution = _data.heightmapResolution,
+                terrainX = x, terrainZ = z, terrainWidth = 1, terrainHeight = 1,
+                terrainPayload = TerrainPatchCodec.EncodeHeights(Blob(1, 1, value), 0, 0, 1, 1) };
+        }
+
+        static WireMessage LockRequest(ControlSession session)
+        {
+            var request = session.SentControl.Find(m => m.type == MessageTypes.TerrainLock);
+            Assert.IsNotNull(request, "the native callback must request a lease");
+            return request;
+        }
+
+        static TerrainRegionLease Grant(ControlSession session, WireMessage request, long expiresAt = 0)
+        {
+            var lease = new TerrainRegionLease { terrainGuid = request.terrainGuid, leaseId = Guid.NewGuid().ToString("N"),
+                clientId = session.ClientId, displayName = "Test owner", x = request.regionX, z = request.regionZ,
+                width = request.regionWidth, height = request.regionHeight,
+                expiresAt = expiresAt == 0 ? DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + 15000 : expiresAt };
+            session.DeliverControl(new WireMessage { type = MessageTypes.TerrainLocks, opId = request.opId,
+                accepted = true, terrainLeaseId = lease.leaseId, terrainLocks = new[] { lease } });
+            return lease;
+        }
+
+        static void Ack(ControlSession session, WireMessage patch, bool accepted)
+        {
+            session.DeliverControl(new WireMessage { type = MessageTypes.TerrainAck, opId = patch.opId,
+                accepted = accepted, syncId = patch.syncId, code = accepted ? null : "terrain_lease_invalid" });
+        }
+
+        /// <summary>Advance the dirty-version fallback used by legacy CPU painting APIs.</summary>
         static void TickAgain(TerrainSync sync)
         {
             Thread.Sleep((int)(TerrainSync.PollSeconds * 1000) + 200);
@@ -312,7 +740,7 @@ namespace SceneCollab.Editor.Tests
         /// The four members <see cref="TerrainSync"/> touches, and nothing else. A real session needs a
         /// server; the point of these tests is that the terrain path does not.
         /// </summary>
-        sealed class FakeSession : ISceneCollabSession
+        class FakeSession : ISceneCollabSession
         {
             public bool IsHost { get; set; }
 
@@ -456,6 +884,14 @@ namespace SceneCollab.Editor.Tests
             {
                 throw new NotSupportedException();
             }
+        }
+
+        sealed class ControlSession : FakeSession, ICollabControlSession
+        {
+            public readonly List<WireMessage> SentControl = new List<WireMessage>();
+            public event Action<WireMessage> ControlReceived;
+            public bool SendControl(WireMessage message) { SentControl.Add(message); return true; }
+            public void DeliverControl(WireMessage message) { ControlReceived?.Invoke(message); }
         }
     }
 }

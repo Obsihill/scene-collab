@@ -5,6 +5,36 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] — 2026-11-14
+
+### Added
+
+- Automatic terrain region leases and Scene view occupancy overlays for concurrent height/paint
+  editing in separate regions. The host still owns saving the shared scene and TerrainData assets.
+- Recovery status, scene progress, terrain tile counts, reconnect countdown, persistent failure
+  details and a full resynchronisation button in the collaboration window.
+
+### Fixed
+
+- Pause normal scene/terrain editing and scene/TerrainData saves during disconnect and recovery.
+  Resume only after every participant confirms the current scene and terrain transfer.
+- Correlate operation acknowledgements, clear obsolete ACK waits after disconnect, retry stale
+  revisions with the original payload, and restore unconfirmed property values on rejected recovery.
+- Update host/scribe roles from presence after promotion; reject incomplete or reordered snapshots.
+- Keep a promoted host frozen when its inbound recovery was incomplete. Preserve late accepted
+  scene/terrain verdicts across a local pause so recovery cannot publish an older baseline.
+
+### Changed
+
+- Protocol **2** is required on the server and every editor. Update them together; v0.5.6 uses
+  protocol 1 and is incompatible with this release.
+- Connect starts scene synchronisation automatically; stopping collaboration disconnects the peer.
+
+### Validation
+
+- 81 server tests and 251 Unity EditMode tests passed.
+- Multi-editor interaction and external-network performance validation remain pending.
+
 ## [0.5.6] — 2026-11-13
 
 ### Fixed

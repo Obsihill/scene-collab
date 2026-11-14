@@ -59,7 +59,7 @@ namespace SceneCollab.Domain.Tests
             var result = room.Apply(SnapshotOp("guest-2", room.Revision, snapshot: true));
 
             Assert.False(result.Accepted);
-            Assert.Equal(ErrorCodes.Locked, result.Code);
+            Assert.Equal(ErrorCodes.NotHost, result.Code);
         }
 
         [Fact]

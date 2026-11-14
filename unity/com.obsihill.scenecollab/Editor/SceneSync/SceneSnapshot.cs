@@ -292,6 +292,7 @@ namespace SceneCollab.Editor.SceneSync
     public sealed class SnapshotReceiver
     {
         readonly HashSet<string> _seen = new HashSet<string>(StringComparer.Ordinal);
+        readonly List<WireMessage> _deferred = new List<WireMessage>();
 
         public bool Active { get; private set; }
 
@@ -304,10 +305,12 @@ namespace SceneCollab.Editor.SceneSync
         public int Nodes { get; private set; }
 
         public string LastError { get; private set; }
+        public bool IsComplete { get { return Active && TotalChunks > 0 && Chunks == TotalChunks && _deferred.Count == 0; } }
 
         public void Begin()
         {
             _seen.Clear();
+            _deferred.Clear();
             Active = true;
             Chunks = 0;
             TotalChunks = 0;
@@ -344,6 +347,13 @@ namespace SceneCollab.Editor.SceneSync
                 return false;
             }
 
+            if (chunk.total <= 0 || chunk.total > 100000 || chunk.index != Chunks
+                || (TotalChunks != 0 && chunk.total != TotalChunks))
+            {
+                LastError = "snapshot chunks are missing, duplicated or out of order";
+                return false;
+            }
+
             Chunks++;
             TotalChunks = chunk.total;
 
@@ -352,7 +362,8 @@ namespace SceneCollab.Editor.SceneSync
                 var op = chunk.ops[i];
                 if (op == null)
                 {
-                    continue;
+                    LastError = "null operation in snapshot";
+                    return false;
                 }
 
                 op.snapshot = true;
@@ -367,9 +378,30 @@ namespace SceneCollab.Editor.SceneSync
                 {
                     Ops++;
                 }
+                else _deferred.Add(op); // Scene references may point at nodes in later chunks.
             }
 
             return true;
+        }
+
+        public bool TryComplete(SceneOpApplier applier)
+        {
+            if (!Active || TotalChunks == 0 || Chunks != TotalChunks)
+            {
+                LastError = "snapshot ended before every chunk arrived";
+                return false;
+            }
+            for (var i = _deferred.Count - 1; i >= 0; i--)
+            {
+                string note;
+                if (applier.Apply(_deferred[i], out note))
+                {
+                    Ops++;
+                    _deferred.RemoveAt(i);
+                }
+                else LastError = "snapshot field could not be applied: " + note;
+            }
+            return _deferred.Count == 0;
         }
 
         /// <summary>Closes the snapshot and returns the node ids it claimed.</summary>
@@ -384,6 +416,7 @@ namespace SceneCollab.Editor.SceneSync
         {
             Active = false;
             _seen.Clear();
+            _deferred.Clear();
         }
     }
 }

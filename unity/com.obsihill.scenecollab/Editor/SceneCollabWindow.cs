@@ -25,9 +25,11 @@ namespace SceneCollab.Editor
         SceneCollabSync _sync;
         readonly CollabRoomList _roomList = new CollabRoomList();
         Vector2 _logScroll;
+        Vector2 _bodyScroll;
         string _tokenDraft;
         string _tokenNotice;
         bool _roomsDirty;
+        double _nextStatusRepaint;
 
         [MenuItem("Tools/Scene Collab", priority = 40)]
         public static void Open()
@@ -54,6 +56,11 @@ namespace SceneCollab.Editor
 
         void PollRooms()
         {
+            if (EditorApplication.timeSinceStartup >= _nextStatusRepaint)
+            {
+                _nextStatusRepaint = EditorApplication.timeSinceStartup + 0.25;
+                Repaint();
+            }
             if (!_roomList.Poll())
             {
                 return;
@@ -153,6 +160,7 @@ namespace SceneCollab.Editor
             var connected = _session.State == CollabConnectionState.Connected;
             var connecting = _session.State == CollabConnectionState.Connecting;
             var editable = !connected && !connecting;
+            _bodyScroll = EditorGUILayout.BeginScrollView(_bodyScroll);
 
             EditorGUILayout.Space(4f);
             EditorGUILayout.LabelField("Server", EditorStyles.boldLabel);
@@ -208,20 +216,17 @@ namespace SceneCollab.Editor
             EditorGUILayout.Space(6f);
             EditorGUILayout.LabelField("Scene sync", EditorStyles.boldLabel);
             var syncing = _sync != null && _sync.Enabled;
-            if (GUILayout.Button(syncing ? "Stop syncing" : "Start syncing", GUILayout.Height(22f)))
+            if (syncing && GUILayout.Button("Stop collaboration / disconnect", GUILayout.Height(22f)))
             {
-                if (syncing)
-                {
-                    _sync.Disable();
-                }
-                else
-                {
-                    _sync.Enable();
-                }
+                Detach();
+                Attach(new CollabSession());
+                Log("collaboration stopped");
+                GUIUtility.ExitGUI();
             }
 
             if (_sync != null)
             {
+                DrawRecovery();
                 EditorGUILayout.LabelField("Known nodes", _sync.KnownNodes.ToString());
                 EditorGUILayout.LabelField("Structure sent", _sync.StructureSent.ToString());
                 EditorGUILayout.LabelField("Held by lock", _sync.LocksSkipped.ToString());
@@ -276,15 +281,12 @@ namespace SceneCollab.Editor
 
                 if (_sync.Terrain.KnownTerrains > 0)
                 {
-                    // Terrain is host-authoritative and rides its own channel, so the honest thing to show
-                    // is which side of that rule this editor is on.
                     var terrain = _sync.Terrain;
-                    var host = _session != null && _session.IsHost;
                     EditorGUILayout.LabelField("Terrain",
                         terrain.KnownTerrains + " terrain(s) — "
-                        + (host
-                            ? "sculpting is live (" + terrain.Sent + " patch(es) sent)"
-                            : "read-only, the host sculpts (" + terrain.Applied + " patch(es) applied)"));
+                        + (_sync.CanEdit ? "automatic region locks" : "editing paused"));
+                    EditorGUILayout.LabelField("Terrain sent / applied", terrain.Sent + " / " + terrain.Applied);
+                    EditorGUILayout.LabelField(terrain.LastNote ?? "", EditorStyles.wordWrappedMiniLabel);
                 }
 
                 if (_sync.Terrain.Skipped > 0)
@@ -295,26 +297,6 @@ namespace SceneCollab.Editor
                         MessageType.Warning);
                 }
 
-                if (connected)
-                {
-                    using (new EditorGUILayout.HorizontalScope())
-                    {
-                        if (!_session.IsHost && GUILayout.Button("Resync from host"))
-                        {
-                            // The escape hatch for a scene that drifted (a save from an old session, an
-                            // undo the room never saw). Cheap: it only asks, the host decides.
-                            _sync.RequestSnapshot();
-                            Log(_sync.LastNote);
-                        }
-
-                        if (_session.IsHost && GUILayout.Button("Send snapshot"))
-                        {
-                            _sync.QueueSnapshot("manual");
-                            Log(_sync.LastNote);
-                        }
-                    }
-                }
-
                 if (!string.IsNullOrEmpty(_sync.AssetNote))
                 {
                     EditorGUILayout.HelpBox(_sync.AssetNote + " — ERROR signs mark what this "
@@ -323,7 +305,7 @@ namespace SceneCollab.Editor
                         + " …) in the hierarchy.", MessageType.Warning);
                 }
 
-                if (connected)
+                if (_sync.CanEdit)
                 {
                     using (new EditorGUILayout.HorizontalScope())
                     {
@@ -382,6 +364,7 @@ namespace SceneCollab.Editor
                 EditorGUILayout.LabelField(_log[i], EditorStyles.miniLabel);
             }
 
+            EditorGUILayout.EndScrollView();
             EditorGUILayout.EndScrollView();
         }
 
@@ -442,18 +425,6 @@ namespace SceneCollab.Editor
 
         void SendLockOnSelection(bool acquire)
         {
-            if (!acquire)
-            {
-                var locked = _session.LockedNodeIds;
-                for (var i = 0; i < locked.Length; i++)
-                {
-                    _session.SendLock(locked[i], true);
-                }
-
-                Log("released " + locked.Length + " lock(s)");
-                return;
-            }
-
             var selection = Selection.gameObjects;
             var sent = 0;
             for (var i = 0; i < selection.Length; i++)
@@ -461,12 +432,49 @@ namespace SceneCollab.Editor
                 string nodeId;
                 if (_sync.Registry.TryGetNodeId(selection[i], out nodeId) && !string.IsNullOrEmpty(nodeId))
                 {
-                    _session.SendLock(nodeId, false);
+                    _session.SendLock(nodeId, !acquire);
                     sent++;
                 }
             }
 
-            Log("requested " + sent + " lock(s)");
+            Log("requested " + sent + (acquire ? " lock(s)" : " unlock(s)"));
+        }
+
+        void DrawRecovery()
+        {
+            if (!_sync.Enabled) return;
+            EditorGUILayout.HelpBox(_sync.RecoveryStatus ?? "동기화 준비 중",
+                _sync.CanEdit ? MessageType.Info : MessageType.Warning);
+            var total = _sync.RecoverySceneTotal;
+            if (total > 0 && !_sync.CanEdit)
+            {
+                var done = _sync.RecoverySceneCompleted;
+                var rect = EditorGUILayout.GetControlRect(false, 18f);
+                EditorGUI.ProgressBar(rect, Mathf.Clamp01((float)done / total), "장면 " + done + " / " + total);
+            }
+            if (!_sync.CanEdit)
+                EditorGUILayout.LabelField("터레인 처리", _sync.RecoveryTerrainTiles + " 타일");
+            if (!_sync.CanEdit && _sync.RecoveryTerrainTotal > 0)
+            {
+                var rect = EditorGUILayout.GetControlRect(false, 18f);
+                EditorGUI.ProgressBar(rect, Mathf.Clamp01((float)_sync.RecoveryTerrainTiles / _sync.RecoveryTerrainTotal),
+                    "터레인 " + _sync.RecoveryTerrainTiles + " / " + _sync.RecoveryTerrainTotal);
+            }
+            var session = _session as CollabSession;
+            if (session != null && _session.State == CollabConnectionState.Connecting && session.RetryAt > 0)
+                EditorGUILayout.LabelField("자동 재연결", Math.Max(0, (int)Math.Ceiling(session.RetryAt - EditorApplication.timeSinceStartup)) + "초 후");
+            if (!string.IsNullOrEmpty(_sync.LastFailure))
+            {
+                EditorGUILayout.HelpBox((_sync.CanEdit ? "지난 실패 기록 (현재 복구 완료): " : "") + _sync.LastFailure,
+                    _sync.CanEdit ? MessageType.Info : MessageType.Error);
+                if (GUILayout.Button("실패 메시지 지우기")) _sync.ClearFailure();
+            }
+            using (new EditorGUI.DisabledScope(_session.State != CollabConnectionState.Connected))
+            {
+                if (GUILayout.Button("전체 재동기화 / 복구")) _sync.RetryRecovery();
+            }
+            if (!_sync.CanEdit)
+                EditorGUILayout.LabelField("모든 참여자의 장면·터레인 검증이 끝나면 편집을 재개합니다.", EditorStyles.wordWrappedMiniLabel);
         }
 
         /// <summary>
@@ -518,6 +526,7 @@ namespace SceneCollab.Editor
 
             Log("connecting to " + _settings.BuildConnectionUrl());
             _session.Connect(_settings);
+            _sync.Enable(); // Drain queued network verdicts before the sync layer checks ACK timeouts.
         }
 
         static void DrawColorSwatch(string hex)

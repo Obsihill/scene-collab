@@ -22,6 +22,7 @@ namespace SceneCollab.Editor.SceneSync
 
         /// <summary>The new host is still catching up after promotion: writing now would freeze a partial scene.</summary>
         BlockHostVerifying,
+        BlockRecovering,
     }
 
     /// <summary>
@@ -59,6 +60,8 @@ namespace SceneCollab.Editor.SceneSync
                     return "save of " + path + " cancelled: only the host writes the scene file.";
                 case SaveGuardDecision.BlockHostVerifying:
                     return "save of " + path + " held: this editor was just promoted to host and is still catching up.";
+                case SaveGuardDecision.BlockRecovering:
+                    return "save of " + path + " held: collaboration is disconnected or resynchronising.";
                 default:
                     return null;
             }
@@ -86,6 +89,7 @@ namespace SceneCollab.Editor.SceneSync
 
         /// <summary>Set by the sync layer: a promoted host whose scene is not verified complete yet.</summary>
         public static bool HostNotVerified;
+        public static bool RecoveryBlocked;
 
         /// <summary>Raised when a save was cancelled or held, so the UI can say who may save.</summary>
         public static event System.Action<string> SaveBlocked;
@@ -169,7 +173,7 @@ namespace SceneCollab.Editor.SceneSync
                 return;
             }
 
-            var decision = SaveGuardPolicy.Decide(
+            var decision = RecoveryBlocked ? SaveGuardDecision.BlockRecovering : SaveGuardPolicy.Decide(
                 BlockNonScribeSaves || HostNotVerified,
                 true,
                 !BlockNonScribeSaves,
@@ -179,7 +183,8 @@ namespace SceneCollab.Editor.SceneSync
             LastDecision = decision;
             LastPath = path;
 
-            if (decision == SaveGuardDecision.BlockGuest || decision == SaveGuardDecision.BlockHostVerifying)
+            if (decision == SaveGuardDecision.BlockGuest || decision == SaveGuardDecision.BlockHostVerifying
+                || decision == SaveGuardDecision.BlockRecovering)
             {
                 // OnWillSaveAssets may already have cancelled this one; remember the path so
                 // OnSceneSaved can tell "cancelled" from "a tool wrote straight to disk".
@@ -263,7 +268,7 @@ namespace SceneCollab.Editor.SceneSync
 
         static string[] OnWillSaveAssets(string[] paths)
         {
-            if (paths == null || paths.Length == 0 || (!BlockNonScribeSaves && !HostNotVerified))
+            if (paths == null || paths.Length == 0 || (!BlockNonScribeSaves && !HostNotVerified && !RecoveryBlocked))
             {
                 return paths;
             }
@@ -273,9 +278,19 @@ namespace SceneCollab.Editor.SceneSync
 
             for (var i = 0; i < paths.Length; i++)
             {
-                if (!IsScenePath(paths[i]))
+                var terrainAsset = AssetDatabase.GetMainAssetTypeAtPath(paths[i]) == typeof(TerrainData);
+                if (!IsScenePath(paths[i]) && !terrainAsset)
                 {
                     kept.Add(paths[i]);
+                    continue;
+                }
+
+                if (RecoveryBlocked || (terrainAsset && (BlockNonScribeSaves || HostNotVerified)))
+                {
+                    LastDecision = RecoveryBlocked ? SaveGuardDecision.BlockRecovering
+                        : BlockNonScribeSaves ? SaveGuardDecision.BlockGuest : SaveGuardDecision.BlockHostVerifying;
+                    LastPath = paths[i];
+                    blocked.Add(paths[i]);
                     continue;
                 }
 
